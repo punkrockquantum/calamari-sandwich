@@ -1,0 +1,188 @@
+import type {
+  CharacterProfile,
+  DirectorPromptResult,
+  ExplainerProject,
+  GenerateProjectRequest,
+  HiggsfieldJobState,
+  MusicTrack,
+  ProviderStatus,
+  SceneItem,
+  VoiceProfile,
+} from '@shared/types';
+import {
+  buildConnectorHeaders,
+  type DemoFallbackPrefs,
+  type SessionConnectorKeys,
+} from './connectors/registry';
+
+export type { SessionConnectorKeys };
+
+async function requestJson<T>(
+  url: string,
+  init?: RequestInit,
+  keys?: Partial<SessionConnectorKeys>,
+  demoPrefs?: Partial<DemoFallbackPrefs>
+): Promise<T> {
+  const headers: Record<string, string> = {
+    ...buildConnectorHeaders(keys, demoPrefs),
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (init?.body && !(init.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const res = await fetch(url, { ...init, headers });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(errBody.error || `Request failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const studioApi = {
+  getProviderStatus(keys?: Partial<SessionConnectorKeys>) {
+    return requestJson<ProviderStatus>('/api/providers/status', undefined, keys);
+  },
+
+  listProjects() {
+    return requestJson<{ projects: ExplainerProject[] }>('/api/projects');
+  },
+
+  generateProject(payload: GenerateProjectRequest, keys?: Partial<SessionConnectorKeys>) {
+    return requestJson<{ project: ExplainerProject }>(
+      '/api/projects/generate',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      keys
+    );
+  },
+
+  updateScene(projectId: string, sceneId: string, patch: Partial<SceneItem>) {
+    return requestJson<{ project: ExplainerProject; scene: SceneItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
+  },
+
+  addMusicTrack(projectId: string, track: Omit<MusicTrack, 'id'>) {
+    return requestJson<{ project: ExplainerProject; track: MusicTrack }>(
+      `/api/projects/${encodeURIComponent(projectId)}/music`,
+      {
+        method: 'POST',
+        body: JSON.stringify(track),
+      }
+    );
+  },
+
+  deleteMusicTrack(projectId: string, trackId: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/music/${encodeURIComponent(trackId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  runDirectorPrompt(
+    projectId: string,
+    prompt: string,
+    keys?: Partial<SessionConnectorKeys>
+  ) {
+    return requestJson<DirectorPromptResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/director`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ prompt }),
+      },
+      keys
+    );
+  },
+
+  undoProject(projectId: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/undo`,
+      { method: 'POST' }
+    );
+  },
+
+  redoProject(projectId: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/redo`,
+      { method: 'POST' }
+    );
+  },
+
+  restoreSnapshot(projectId: string, snapshotId: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/restore/${encodeURIComponent(snapshotId)}`,
+      { method: 'POST' }
+    );
+  },
+
+  listCharacters() {
+    return requestJson<{ characters: CharacterProfile[]; presets: CharacterProfile[] }>(
+      '/api/characters'
+    );
+  },
+
+  cloneCharacter(formData: FormData, keys?: Partial<SessionConnectorKeys>) {
+    return requestJson<{ character: CharacterProfile }>(
+      '/api/characters/clone',
+      {
+        method: 'POST',
+        body: formData,
+      },
+      keys
+    );
+  },
+
+  listVoices(keys?: Partial<SessionConnectorKeys>) {
+    return requestJson<{
+      voices: VoiceProfile[];
+      source: 'env' | 'session' | 'mock';
+      fallbackReason?: string;
+    }>('/api/voices', undefined, keys);
+  },
+
+  async synthesizeSpeech(
+    params: { voiceId: string; text: string; projectId?: string; sceneId?: string },
+    keys?: Partial<SessionConnectorKeys>
+  ): Promise<{ blobUrl: string; source: string; fallbackReason?: string }> {
+    const res = await fetch('/api/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildConnectorHeaders(keys),
+      },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'TTS failed' }));
+      throw new Error(err.error || 'TTS failed');
+    }
+    const blob = await res.blob();
+    return {
+      blobUrl: URL.createObjectURL(blob),
+      source: res.headers.get('X-Voice-Source') || 'mock',
+      fallbackReason: res.headers.get('X-Voice-Fallback-Reason') || undefined,
+    };
+  },
+
+  generateHiggsfieldScene(
+    projectId: string,
+    sceneId: string,
+    keys?: Partial<SessionConnectorKeys>
+  ) {
+    return requestJson<{ project: ExplainerProject; higgsfield: HiggsfieldJobState }>(
+      '/api/higgsfield/generate',
+      {
+        method: 'POST',
+        body: JSON.stringify({ projectId, sceneId }),
+      },
+      keys
+    );
+  },
+};
