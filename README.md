@@ -21,8 +21,8 @@ npm install
 npm run dev
 ```
 
-- Web UI: `http://127.0.0.1:5173`
-- API Server: `http://127.0.0.1:3001`
+- Web UI: `http://localhost:5173` (and `http://127.0.0.1:5173`)
+- API Server: `http://localhost:3001` (and `http://127.0.0.1:3001`)
 
 ## Verification
 

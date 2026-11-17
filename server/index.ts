@@ -31,18 +31,34 @@ export function createApp(options: CreateAppOptions = {}) {
   return { app, store };
 }
 
+function resolveRealPath(filePath: string): string {
+  try {
+    return fs.realpathSync(path.resolve(filePath));
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
 const isDirectRun =
-  process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+  process.argv[1] && import.meta.url === pathToFileURL(resolveRealPath(process.argv[1])).href;
 
 if (isDirectRun) {
   const port = Number(process.env.PORT || 3001);
+  const host = process.env.HOST?.trim();
   const { app, store } = createApp();
   store
     .ensureInitialized()
     .then(() => {
-      app.listen(port, '127.0.0.1', () => {
-        console.log(`Calamari Sandwich Studio API listening on http://127.0.0.1:${port}`);
-      });
+      const onListen = () => {
+        console.log(
+          `Calamari Sandwich Studio API listening on http://${host || 'localhost'}:${port}`
+        );
+      };
+      if (host) {
+        app.listen(port, host, onListen);
+      } else {
+        app.listen(port, onListen);
+      }
     })
     .catch((err) => {
       console.error('Failed to initialize ProjectStore:', err);

@@ -5,9 +5,9 @@
   "description": "Calamari Sandwich — Creative AI Tech-Explainer Video Studio with modular API Connectors",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web -c cyan,magenta \"tsx watch server/index.ts\" \"vite --host 127.0.0.1 --port 5173\"",
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"tsx watch server/index.ts\" \"vite --host --port 5173\"",
     "dev:server": "tsx watch server/index.ts",
-    "dev:client": "vite --host 127.0.0.1 --port 5173",
+    "dev:client": "vite --host --port 5173",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "NODE_ENV=production node dist/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
