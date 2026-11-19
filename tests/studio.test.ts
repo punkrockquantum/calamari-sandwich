@@ -131,9 +131,16 @@ describe('Explainer Studio Full-Stack API & Core Services', () => {
       .send({ voiceId: 'mock-rachel', text: 'Explaining attention heads in 60 seconds.' })
       .expect(200);
 
-    expect(ttsRes.headers['content-type']).toContain('audio/wav');
-    expect(Buffer.isBuffer(ttsRes.body)).toBe(true);
-    expect(ttsRes.body.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    const ct = ttsRes.headers['content-type'] || '';
+    if (ct.includes('audio/wav')) {
+      expect(Buffer.isBuffer(ttsRes.body)).toBe(true);
+      expect(ttsRes.body.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    } else {
+      expect(ct).toContain('application/json');
+      expect(ttsRes.body.mode).toBe('browser-speech-synthesis');
+      expect(ttsRes.body.text).toBe('Explaining attention heads in 60 seconds.');
+      expect(ttsRes.body.speechConfig.preferredVoices.length).toBeGreaterThan(0);
+    }
   });
 
   it('supports Higgsfield scene generation fallback and Director Prompt iterative edits with undo/redo', async () => {

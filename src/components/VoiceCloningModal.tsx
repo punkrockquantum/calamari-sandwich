@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AudioLines,
   Loader2,
   Mic,
   MicOff,
@@ -9,7 +10,7 @@ import {
   Volume2,
   X,
 } from 'lucide-react';
-import type { VoiceTraits } from '@shared/types';
+import type { VoicePlaybackMode, VoiceTraits } from '@shared/types';
 
 interface VoiceCloningModalProps {
   open: boolean;
@@ -35,6 +36,7 @@ export function VoiceCloningModal({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [sampleMode, setSampleMode] = useState<'upload' | 'record' | 'traits'>('upload');
+  const [playbackMode, setPlaybackMode] = useState<VoicePlaybackMode>('direct-sample');
   const [sampleFile, setSampleFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -85,7 +87,7 @@ export function VoiceCloningModal({
   const startRecording = async () => {
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setError('Microphone recording is unavailable in this browser context. Upload an audio/video file or use Trait Synthesis.');
+      setError('Microphone recording is unavailable in this browser context. Upload an audio/video file or use System Speech + Traits.');
       return;
     }
     try {
@@ -104,6 +106,7 @@ export function VoiceCloningModal({
         const ext = mime.includes('wav') ? 'wav' : mime.includes('ogg') ? 'ogg' : 'webm';
         const file = new File([blob], `mic-sample-${Date.now()}.${ext}`, { type: mime });
         setSampleFile(file);
+        setPlaybackMode('direct-sample');
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       };
@@ -154,13 +157,16 @@ export function VoiceCloningModal({
     }
 
     if (sampleMode === 'upload' && !fileToUpload) {
-      setError('Select an audio or video voice sample, or switch to Trait Synthesis.');
+      setError('Select an audio or video voice sample, or switch to System Speech + Traits.');
       return;
     }
     if (sampleMode === 'record' && !fileToUpload) {
-      setError('Record a microphone voice sample first, or switch to Trait Synthesis.');
+      setError('Record a microphone voice sample first, or switch to System Speech + Traits.');
       return;
     }
+
+    const effectivePlaybackMode: VoicePlaybackMode =
+      sampleMode !== 'traits' && fileToUpload ? playbackMode : 'speak-script';
 
     const fd = new FormData();
     fd.append('name', name.trim());
@@ -169,6 +175,7 @@ export function VoiceCloningModal({
     fd.append('pitch', pitch);
     fd.append('warmth', String(warmth));
     fd.append('cadence', cadence);
+    fd.append('playbackMode', effectivePlaybackMode);
     if (sampleMode !== 'traits' && fileToUpload) {
       fd.append('sample', fileToUpload);
     }
@@ -199,10 +206,10 @@ export function VoiceCloningModal({
             </div>
             <div>
               <h2 id="voice-clone-title" className="text-sm font-semibold text-zinc-100">
-                Clone Native Voice (+ Add Voice)
+                Add Native Voice (+ Add Voice)
               </h2>
               <p className="text-[11px] text-zinc-400">
-                Clone locally with sample audio/mic + traits; optionally push to ElevenLabs anytime
+                Uses local system speech + voice traits, or plays your recorded audio clip directly. Connect ElevenLabs for neural timbre cloning.
               </p>
             </div>
           </div>
@@ -249,14 +256,14 @@ export function VoiceCloningModal({
           {/* Sample Acquisition Mode */}
           <div>
             <label className="block text-xs font-medium text-zinc-300 mb-1.5">
-              Voice Sample Source
+              Voice Input Source
             </label>
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
                   { id: 'upload', label: 'Upload Audio/Video', icon: Upload },
                   { id: 'record', label: 'Record Microphone', icon: Mic },
-                  { id: 'traits', label: 'Trait Synthesis', icon: Sparkles },
+                  { id: 'traits', label: 'System Speech + Traits', icon: Sparkles },
                 ] as const
               ).map(({ id, label, icon: Icon }) => (
                 <button
@@ -265,6 +272,11 @@ export function VoiceCloningModal({
                   onClick={() => {
                     if (recording) stopRecording();
                     setSampleMode(id);
+                    if (id === 'traits') {
+                      setPlaybackMode('speak-script');
+                    } else if (id === 'record') {
+                      setPlaybackMode('direct-sample');
+                    }
                     setError(null);
                   }}
                   className={`flex items-center justify-center gap-1.5 rounded-xl border py-2 px-2 text-xs font-medium transition ${
@@ -284,7 +296,7 @@ export function VoiceCloningModal({
             <div className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/70 p-3.5 space-y-2">
               <label className="flex flex-col items-center gap-1.5 cursor-pointer text-center">
                 <span className="text-xs font-medium text-zinc-200">
-                  Select a short audio or video voice sample (WAV, MP3, WEBM, M4A, MP4, MOV)
+                  Select an audio or video voice clip (WAV, MP3, WEBM, M4A, MP4, MOV)
                 </span>
                 <input
                   type="file"
@@ -309,8 +321,8 @@ export function VoiceCloningModal({
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 flex flex-col items-center gap-3">
               <div className="text-xs text-zinc-300 text-center">
                 {recording
-                  ? `Recording voice sample... ${recordSec}s`
-                  : 'Click below to record a 5–20 second narration sample using your microphone.'}
+                  ? `Recording voice clip... ${recordSec}s`
+                  : 'Record your narration or voice sample directly from your microphone.'}
               </div>
               <button
                 type="button"
@@ -330,11 +342,51 @@ export function VoiceCloningModal({
             </div>
           )}
 
+          {/* Scene Playback Routing Mode when a clip is provided */}
+          {sampleMode !== 'traits' && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                <AudioLines className="w-3.5 h-3.5 text-cyan-400" />
+                Scene Playback Mode
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPlaybackMode('direct-sample')}
+                  className={`rounded-xl border p-2.5 text-left transition ${
+                    playbackMode === 'direct-sample'
+                      ? 'bg-cyan-500/15 border-cyan-400 text-cyan-100'
+                      : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <div className="text-xs font-semibold">Use Recorded Clip</div>
+                  <div className="text-[10px] opacity-80 mt-0.5">
+                    Plays your actual recorded/uploaded voice in timeline &amp; video export
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlaybackMode('speak-script')}
+                  className={`rounded-xl border p-2.5 text-left transition ${
+                    playbackMode === 'speak-script'
+                      ? 'bg-amber-500/15 border-amber-400 text-amber-100'
+                      : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <div className="text-xs font-semibold">Speak Script Mode</div>
+                  <div className="text-[10px] opacity-80 mt-0.5">
+                    Reads scene text using local system speech + traits (or ElevenLabs if pushed)
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Voice Profile Traits */}
           <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/70 p-3.5 space-y-3">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
               <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-              Voice Profile Traits
+              System Speech &amp; EQ Traits
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -382,7 +434,7 @@ export function VoiceCloningModal({
 
             <div>
               <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
-                <span>Warmth &amp; Resonance</span>
+                <span>EQ Warmth &amp; Resonance</span>
                 <span className="font-mono text-amber-300">{warmth}%</span>
               </div>
               <input

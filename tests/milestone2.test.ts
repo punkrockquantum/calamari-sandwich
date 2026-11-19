@@ -194,14 +194,21 @@ describe('1–30m Builder, Native Voice Cloning, Gemini Veo Push & RAG Context E
     const listRes = await request(reloaded.app).get('/api/voices').expect(200);
     expect(listRes.body.voices.some((v: { voice_id: string }) => v.voice_id === voiceId)).toBe(true);
 
-    // Native TTS synthesis produces valid WAV with X-Voice-Source: native
+    // Native TTS synthesis uses system speech WAV when binary is present, or structured SpeechSynthesis fallback
     const ttsRes = await request(reloaded.app)
       .post('/api/tts')
       .send({ voiceId, text: 'Native cloned voice synthesis test.' })
       .expect(200);
     expect(ttsRes.headers['x-voice-source']).toBe('native');
-    expect(ttsRes.headers['content-type']).toContain('audio/wav');
-    expect(ttsRes.body.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    const ct = ttsRes.headers['content-type'] || '';
+    if (ct.includes('audio/wav')) {
+      expect(ttsRes.body.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    } else {
+      expect(ct).toContain('application/json');
+      expect(ttsRes.body.mode).toBe('browser-speech-synthesis');
+      expect(ttsRes.body.source).toBe('native');
+      expect(ttsRes.body.speechConfig.pitch).toBeLessThan(1);
+    }
 
     // Push while disconnected returns ready workflow export
     const exportRes = await request(reloaded.app)

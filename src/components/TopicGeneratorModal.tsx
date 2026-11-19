@@ -11,7 +11,7 @@ interface TopicGeneratorModalProps {
   busy: boolean;
 }
 
-const DURATION_PRESETS = [1, 2, 5, 10, 15, 20, 30];
+const DURATION_PRESETS = [1, 2, 3, 5, 10, 15, 30];
 
 const SAMPLE_TOPICS = [
   'How Transformer Attention & KV Caching Work',
@@ -29,7 +29,7 @@ export function TopicGeneratorModal({
   busy,
 }: TopicGeneratorModalProps) {
   const [topic, setTopic] = useState(SAMPLE_TOPICS[0]);
-  const [durationMinutes, setDurationMinutes] = useState(10);
+  const [durationMinutes, setDurationMinutes] = useState(2);
   const [audience, setAudience] = useState<AudienceLevel>('engineering');
   const [primaryVoiceId, setPrimaryVoiceId] = useState(
     activeVoiceId || voices[0]?.voice_id || 'mock-rachel'
@@ -39,10 +39,12 @@ export function TopicGeneratorModal({
     if (!open) return;
     if (activeVoiceId && voices.some((v) => v.voice_id === activeVoiceId)) {
       setPrimaryVoiceId(activeVoiceId);
-    } else if (voices.length > 0 && !voices.some((v) => v.voice_id === primaryVoiceId)) {
-      setPrimaryVoiceId(voices[0].voice_id);
+    } else if (voices.length > 0) {
+      setPrimaryVoiceId((prev) =>
+        voices.some((v) => v.voice_id === prev) ? prev : voices[0].voice_id
+      );
     }
-  }, [open, activeVoiceId, voices, primaryVoiceId]);
+  }, [open, activeVoiceId, voices]);
 
   if (!open) return null;
 

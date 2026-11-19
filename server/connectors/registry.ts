@@ -80,12 +80,12 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     defaultEndpoint: DEFAULT_ELEVENLABS_ENDPOINT,
     portalUrl: 'https://elevenlabs.io/app/settings/api-keys',
     portalLabel: 'Open ElevenLabs API Keys',
-    capabilities: ['Voice Library Import', 'Multilingual v2 TTS', 'Procedural WAV Demo Fallback'],
+    capabilities: ['Voice Library Import', 'Multilingual v2 TTS', 'System Speech & Direct Clip Fallback'],
     testLive: async ({ apiKey, endpoint }) => verifyElevenLabsCredentials(apiKey, endpoint),
     verifyDemo: () => ({
       ok: true,
-      message: `Demo Mode active: ${MOCK_VOICES.length} studio voices & local WAV synthesis ready.`,
-      details: { mockVoices: MOCK_VOICES.length, format: 'audio/wav' },
+      message: `Demo Mode active: ${MOCK_VOICES.length} studio voices using real spoken narration (macOS say / espeak-ng / browser SpeechSynthesis).`,
+      details: { mockVoices: MOCK_VOICES.length, engine: 'system-speech' },
     }),
   },
   {

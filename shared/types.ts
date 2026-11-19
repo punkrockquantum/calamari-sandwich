@@ -55,11 +55,35 @@ export interface CharacterProfile {
   createdAt: string;
 }
 
+export type VoicePlaybackMode = 'speak-script' | 'direct-sample';
+
 export interface VoiceTraits {
   tone: string;
   pitch: 'low' | 'medium' | 'high';
   warmth: number;
   cadence: 'measured' | 'conversational' | 'brisk';
+}
+
+export interface TtsSpeechConfig {
+  rate: number;
+  pitch: number;
+  lang: string;
+  gender?: 'female' | 'male' | 'neutral';
+  preferredVoices: string[];
+  tone?: string;
+  warmth?: number;
+  cadence?: VoiceTraits['cadence'];
+}
+
+export interface TtsBrowserFallback {
+  mode: 'browser-speech-synthesis';
+  source: 'native' | 'mock';
+  text: string;
+  voiceId: string;
+  voiceName: string;
+  speechConfig: TtsSpeechConfig;
+  sampleUrl?: string;
+  fallbackReason: string;
 }
 
 export interface VoiceProfile {
@@ -72,6 +96,7 @@ export interface VoiceProfile {
   description?: string;
   sampleUrl?: string;
   sampleMimeType?: string;
+  playbackMode?: VoicePlaybackMode;
   traits?: VoiceTraits;
   elevenlabsVoiceId?: string;
   pushStatus?: 'local' | 'pushed' | 'export-ready';
@@ -151,6 +176,7 @@ export interface SceneItem {
   characterId?: string;
   characterPlacement: CharacterPlacement;
   voiceId: string;
+  voicePlaybackMode?: 'auto' | VoicePlaybackMode;
   voiceAudioUrl?: string;
   voiceStatus: 'pending' | 'synthesized' | 'fallback';
   higgsfield: HiggsfieldJobState;

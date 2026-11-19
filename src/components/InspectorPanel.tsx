@@ -36,6 +36,7 @@ import type {
   SceneVisualOverlay,
   TechAsset,
   TransitionType,
+  VoicePlaybackMode,
   VoiceProfile,
 } from '@shared/types';
 
@@ -60,6 +61,7 @@ interface InspectorPanelProps {
   onPreviewVoice: (voiceId: string, sampleText?: string, sceneId?: string) => Promise<void>;
   onDownloadSceneAudio: (scene: SceneItem) => Promise<void>;
   onPlaySampleUrl: (url: string, label: string) => Promise<void>;
+  onUpdateVoice: (voiceId: string, patch: { playbackMode?: VoicePlaybackMode }) => Promise<void>;
   onDeleteVoice: (voiceId: string) => Promise<void>;
   onPushVoiceToElevenLabs: (voiceId: string) => Promise<void>;
   onSyncElevenLabsVoices: () => Promise<void>;
@@ -130,6 +132,7 @@ export function InspectorPanel({
   onPreviewVoice,
   onDownloadSceneAudio,
   onPlaySampleUrl,
+  onUpdateVoice,
   onDeleteVoice,
   onPushVoiceToElevenLabs,
   onSyncElevenLabsVoices,
@@ -451,54 +454,107 @@ export function InspectorPanel({
             </div>
 
             {/* Voiceover Selector directly in Scene Tab */}
-            <div className="rounded-xl border border-amber-500/25 bg-amber-950/10 p-2.5 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <label className="text-[11px] font-medium text-amber-200 flex items-center gap-1.5">
-                  <Mic className="w-3 h-3 text-amber-400" />
-                  Scene Narrator Voice
-                </label>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void onAssignVoiceToAllScenes(activeScene.voiceId)}
-                    className="text-[10px] text-amber-300 hover:underline"
-                    title="Apply this voice to every scene in the project"
+            {(() => {
+              const selectedVoice = voices.find((v) => v.voice_id === activeScene.voiceId);
+              const effectiveSceneMode: VoicePlaybackMode =
+                activeScene.voicePlaybackMode && activeScene.voicePlaybackMode !== 'auto'
+                  ? activeScene.voicePlaybackMode
+                  : selectedVoice?.playbackMode || 'speak-script';
+
+              return (
+                <div className="rounded-xl border border-amber-500/25 bg-amber-950/10 p-2.5 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[11px] font-medium text-amber-200 flex items-center gap-1.5">
+                      <Mic className="w-3 h-3 text-amber-400" />
+                      Scene Narrator Voice
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void onAssignVoiceToAllScenes(activeScene.voiceId)}
+                        className="text-[10px] text-amber-300 hover:underline"
+                        title="Apply this voice to every scene in the project"
+                      >
+                        Apply to All Scenes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onOpenVoiceClone}
+                        className="text-[10px] text-cyan-300 hover:underline"
+                      >
+                        + Add Voice
+                      </button>
+                    </div>
+                  </div>
+                  <select
+                    aria-label="Scene Narrator Voice"
+                    value={activeScene.voiceId}
+                    onChange={(e) =>
+                      void onUpdateScene(activeScene.id, { voiceId: e.target.value })
+                    }
+                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-amber-500 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none"
                   >
-                    Apply to All Scenes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onOpenVoiceClone}
-                    className="text-[10px] text-cyan-300 hover:underline"
-                  >
-                    + Clone Voice
-                  </button>
+                    {!voices.some((v) => v.voice_id === activeScene.voiceId) && (
+                      <option value={activeScene.voiceId}>{activeScene.voiceId}</option>
+                    )}
+                    {voices.map((v) => (
+                      <option key={v.voice_id} value={v.voice_id}>
+                        {v.name} (
+                        {v.source === 'native'
+                          ? v.playbackMode === 'direct-sample' && v.sampleUrl
+                            ? 'Native Clip'
+                            : 'System Speech'
+                          : v.source === 'elevenlabs'
+                            ? 'ElevenLabs'
+                            : 'System Speech'}
+                        )
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedVoice?.source === 'native' && selectedVoice.sampleUrl && (
+                    <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void onUpdateScene(activeScene.id, { voicePlaybackMode: 'speak-script' })
+                        }
+                        className={`rounded-lg border py-1 px-2 text-[10px] font-medium transition ${
+                          effectiveSceneMode === 'speak-script'
+                            ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
+                            : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        Speak Script
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void onUpdateScene(activeScene.id, { voicePlaybackMode: 'direct-sample' })
+                        }
+                        className={`rounded-lg border py-1 px-2 text-[10px] font-medium transition ${
+                          effectiveSceneMode === 'direct-sample'
+                            ? 'border-cyan-400/60 bg-cyan-500/20 text-cyan-200'
+                            : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        Use Recorded Clip
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="text-[10px] text-zinc-400 leading-snug">
+                    {selectedVoice?.source === 'elevenlabs'
+                      ? 'Neural TTS synthesized via connected ElevenLabs account.'
+                      : selectedVoice?.source === 'native' &&
+                          effectiveSceneMode === 'direct-sample' &&
+                          selectedVoice.sampleUrl
+                        ? 'Plays your recorded/uploaded voice clip directly in timeline & video export.'
+                        : 'Uses local system speech + voice traits. Connect ElevenLabs for neural timbre cloning.'}
+                  </div>
                 </div>
-              </div>
-              <select
-                aria-label="Scene Narrator Voice"
-                value={activeScene.voiceId}
-                onChange={(e) =>
-                  void onUpdateScene(activeScene.id, { voiceId: e.target.value })
-                }
-                className="w-full bg-zinc-950 border border-zinc-800 focus:border-amber-500 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none"
-              >
-                {!voices.some((v) => v.voice_id === activeScene.voiceId) && (
-                  <option value={activeScene.voiceId}>{activeScene.voiceId}</option>
-                )}
-                {voices.map((v) => (
-                  <option key={v.voice_id} value={v.voice_id}>
-                    {v.name} (
-                    {v.source === 'native'
-                      ? 'Native Clone'
-                      : v.source === 'elevenlabs'
-                        ? 'ElevenLabs'
-                        : 'Studio'}
-                    )
-                  </option>
-                ))}
-              </select>
-            </div>
+              );
+            })()}
 
             {/* Push to Provider + Native Voiceover */}
             <div className="pt-1 flex flex-col gap-2">
@@ -751,11 +807,11 @@ export function InspectorPanel({
             {!isElevenLabsConnected ? (
               <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-3 space-y-2">
                 <div className="text-xs font-semibold text-amber-200">
-                  Native cloning active • Optional ElevenLabs push
+                  Local system speech &amp; direct clips active
                 </div>
                 <p className="text-[11px] text-amber-200/75 leading-relaxed">
-                  Clone voices directly with <strong>+ Add Voice</strong> above, or connect
-                  ElevenLabs to import library voices &amp; push custom voices to your account.
+                  Native voices use local system speech + traits or play your recorded audio clip
+                  directly. Connect ElevenLabs for neural timbre cloning &amp; library voices.
                 </p>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -877,10 +933,12 @@ export function InspectorPanel({
                             }`}
                           >
                             {v.source === 'elevenlabs'
-                              ? 'ElevenLabs'
+                              ? 'ElevenLabs Neural'
                               : isNative
-                                ? 'Native Clone'
-                                : 'Demo'}
+                                ? v.playbackMode === 'direct-sample' && v.sampleUrl
+                                  ? 'Direct Clip'
+                                  : 'System Speech + Traits'
+                                : 'System Speech'}
                           </span>
                         </div>
                         <div className="text-[10px] text-zinc-400 truncate">
@@ -926,20 +984,45 @@ export function InspectorPanel({
                           {v.elevenlabsVoiceId
                             ? `Synced: ${v.elevenlabsVoiceId}`
                             : v.sampleUrl
-                              ? 'Sample saved on server'
-                              : 'Trait-synthesized'}
+                              ? v.playbackMode === 'direct-sample'
+                                ? 'Direct sample clip active'
+                                : 'Clip saved • Speak Script mode'
+                              : 'System speech + traits'}
                         </span>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           {v.sampleUrl && (
-                            <button
-                              type="button"
-                              onClick={() => void onPlaySampleUrl(v.sampleUrl!, v.name)}
-                              className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[10px] font-medium text-zinc-200 transition"
-                              title="Play uploaded/recorded sample"
-                            >
-                              <Volume2 className="w-2.5 h-2.5 text-cyan-300" />
-                              Sample
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void onUpdateVoice(v.voice_id, {
+                                    playbackMode:
+                                      v.playbackMode === 'direct-sample'
+                                        ? 'speak-script'
+                                        : 'direct-sample',
+                                  })
+                                }
+                                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-medium transition ${
+                                  v.playbackMode === 'direct-sample'
+                                    ? 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                                    : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+                                }`}
+                                title="Switch between Direct Recorded Clip and Speak Script mode"
+                              >
+                                {v.playbackMode === 'direct-sample'
+                                  ? 'Mode: Direct Clip'
+                                  : 'Mode: Speak Script'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void onPlaySampleUrl(v.sampleUrl!, v.name)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[10px] font-medium text-zinc-200 transition"
+                                title="Play uploaded/recorded sample"
+                              >
+                                <Volume2 className="w-2.5 h-2.5 text-cyan-300" />
+                                Sample
+                              </button>
+                            </>
                           )}
                           <button
                             type="button"

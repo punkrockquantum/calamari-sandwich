@@ -80,6 +80,7 @@ const TtsSchema = z.object({
   text: z.string().min(1).max(5000),
   projectId: z.string().optional(),
   sceneId: z.string().optional(),
+  playbackMode: z.enum(['auto', 'speak-script', 'direct-sample']).optional(),
 });
 
 const HiggsfieldSceneSchema = z.object({
@@ -121,6 +122,7 @@ const UpdateSceneSchema = z.object({
   characterId: z.string().optional().nullable(),
   characterPlacement: z.enum(['left', 'center', 'right', 'split', 'offscreen']).optional(),
   voiceId: z.string().min(1).max(120).optional(),
+  voicePlaybackMode: z.enum(['auto', 'speak-script', 'direct-sample']).optional(),
   assetIds: z.array(z.string()).optional(),
   activeVideoProvider: z.enum(['higgsfield', 'gemini_veo']).optional().nullable(),
 });
@@ -508,6 +510,9 @@ export function createApiRouter(
       if (updates.characterId !== undefined) scene.characterId = updates.characterId || undefined;
       if (updates.characterPlacement !== undefined) scene.characterPlacement = updates.characterPlacement;
       if (updates.voiceId !== undefined) scene.voiceId = updates.voiceId;
+      if (updates.voicePlaybackMode !== undefined) {
+        scene.voicePlaybackMode = updates.voicePlaybackMode;
+      }
       if (updates.activeVideoProvider !== undefined) {
         scene.activeVideoProvider = updates.activeVideoProvider || undefined;
       }
@@ -905,12 +910,17 @@ export function createApiRouter(
           : undefined;
         const description =
           typeof req.body?.description === 'string' ? req.body.description : undefined;
+        const playbackMode =
+          req.body?.playbackMode === 'direct-sample' && sampleUrl
+            ? 'direct-sample'
+            : 'speak-script';
 
         const voice = await voiceStore.createClonedVoice({
           name,
           description,
           sampleUrl,
           sampleMimeType,
+          playbackMode,
           traits,
         });
 
@@ -920,6 +930,34 @@ export function createApiRouter(
       }
     }
   );
+
+  router.patch('/voices/:id', async (req, res, next) => {
+    try {
+      const existing = await voiceStore.getVoice(req.params.id);
+      if (!existing) {
+        res.status(404).json({ error: 'Custom voice not found.' });
+        return;
+      }
+      const patch: Partial<typeof existing> = {};
+      if (req.body?.playbackMode === 'direct-sample' || req.body?.playbackMode === 'speak-script') {
+        if (req.body.playbackMode === 'direct-sample' && !existing.sampleUrl) {
+          res.status(400).json({ error: 'Cannot enable direct sample mode without an uploaded or recorded audio sample.' });
+          return;
+        }
+        patch.playbackMode = req.body.playbackMode;
+      }
+      if (typeof req.body?.name === 'string' && req.body.name.trim().length >= 2) {
+        patch.name = req.body.name.trim();
+      }
+      if (typeof req.body?.description === 'string') {
+        patch.description = req.body.description.trim();
+      }
+      const updated = await voiceStore.updateVoice(req.params.id, patch);
+      res.json({ voice: updated });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   router.delete('/voices/:id', async (req, res, next) => {
     try {
@@ -968,35 +1006,47 @@ export function createApiRouter(
         return;
       }
 
+      const project =
+        parsed.data.projectId ? await store.getProject(parsed.data.projectId) : null;
+      const targetScene =
+        project && parsed.data.sceneId
+          ? project.scenes.find((s) => s.id === parsed.data.sceneId)
+          : undefined;
+
       const result = await synthesizeElevenLabsSpeech({
         voiceId: parsed.data.voiceId,
         text: parsed.data.text,
+        playbackMode: parsed.data.playbackMode || targetScene?.voicePlaybackMode,
+        uploadsRootDir: store.getUploadsDir(),
         sessionHeaderKey: getHeaderKey(req, 'x-elevenlabs-key'),
         vault,
         voiceStore,
       });
 
-      if (parsed.data.projectId && parsed.data.sceneId) {
-        const project = await store.getProject(parsed.data.projectId);
-        if (project) {
-          const sc = project.scenes.find((s) => s.id === parsed.data.sceneId);
-          if (sc) {
-            sc.voiceId = parsed.data.voiceId;
-            sc.voiceStatus =
-              result.source === 'elevenlabs' || result.source === 'native'
-                ? 'synthesized'
-                : 'fallback';
-            await store.saveProject(project);
-          }
-        }
+      if (project && targetScene) {
+        targetScene.voiceId = parsed.data.voiceId;
+        targetScene.voiceStatus =
+          result.kind === 'audio' &&
+          (result.source === 'elevenlabs' || result.source === 'native')
+            ? 'synthesized'
+            : 'fallback';
+        await store.saveProject(project);
       }
 
-      res.setHeader('Content-Type', result.contentType);
       res.setHeader('X-Voice-Source', result.source);
       if (result.fallbackReason) {
         res.setHeader('X-Voice-Fallback-Reason', result.fallbackReason);
       }
-      res.send(result.audioBuffer);
+
+      if (result.kind === 'audio') {
+        res.setHeader('Content-Type', result.contentType);
+        res.setHeader('X-Voice-Synthesis-Mode', result.synthesisMode);
+        res.send(result.audioBuffer);
+        return;
+      }
+
+      res.setHeader('X-Voice-Synthesis-Mode', result.fallback.mode);
+      res.json(result.fallback);
     } catch (err) {
       next(err);
     }

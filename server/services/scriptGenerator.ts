@@ -248,10 +248,16 @@ export function generateExplainerProject(params: {
         assetIds: matchedAssetIds,
         ragContext: ragMatches,
         keyPoints: [
-          `${template.phase}: ${topic.split(' ').slice(0, 4).join(' ')}`,
-          `Pacing: ~${Math.round((durationSec / 60) * 145)} spoken words (${durationSec}s)`,
-          `Stage: ${cameraMotion} • ${template.style}`,
-          ...(ragMatches[0] ? [`RAG Context: ${ragMatches[0].name}`] : []),
+          `${template.phase}: ${topic.split(' ').slice(0, 5).join(' ')}`,
+          s === 0
+            ? `Visualizes ${template.focus.replace(/^the\s+/i, '')} cleanly`
+            : `Applies ${tone.pacingLabel} across ${overlay.replace('-', ' ')}`,
+          audience === 'beginner'
+            ? 'Core mental model without jargon'
+            : audience === 'executive'
+              ? 'Latency, throughput & architectural ROI'
+              : 'Runtime invariants & predictable tail latency',
+          ...(ragMatches[0] ? [`Ref: ${ragMatches[0].name}`] : []),
         ],
       };
 

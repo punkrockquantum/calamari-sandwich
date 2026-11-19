@@ -176,7 +176,7 @@ describe('Cloned Voice Usage, MIME Normalization, Director Voice Routing & Video
     const project = genRes.body.project;
     expect(project.scenes.every((s: { voiceId: string }) => s.voiceId === clonedVoiceId)).toBe(true);
 
-    // Synthesize TTS with cloned voice on scene 1
+    // Synthesize TTS with cloned voice on scene 1 (real system speech WAV or structured browser SpeechSynthesis fallback)
     const ttsRes = await request(created.app)
       .post('/api/tts')
       .send({
@@ -187,7 +187,8 @@ describe('Cloned Voice Usage, MIME Normalization, Director Voice Routing & Video
       })
       .expect(200);
     expect(ttsRes.headers['x-voice-source']).toBe('native');
-    expect(ttsRes.headers['content-type']).toContain('audio/wav');
+    const ttsCt = ttsRes.headers['content-type'] || '';
+    expect(ttsCt.includes('audio/wav') || ttsCt.includes('application/json')).toBe(true);
 
     // Director Prompt can switch voice back and then to cloned voice
     const dirSwitch = await request(created.app)
