@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Sparkles,
   UserPlus,
+  Video,
   XCircle,
 } from 'lucide-react';
 import type {
@@ -48,6 +49,7 @@ interface ConnectorsWorkspaceProps {
 const CONNECTOR_ICONS: Record<ConnectorId, typeof Mic> = {
   elevenlabs: Mic,
   higgsfield: Film,
+  gemini_veo: Video,
   character_cloning: UserPlus,
   script_director_llm: Cpu,
   music_soundtrack: Music,
@@ -129,9 +131,10 @@ export function ConnectorsWorkspace({
               </span>
             </div>
             <p className="text-xs text-zinc-400 max-w-2xl">
-              Connect your ElevenLabs and Higgsfield accounts with one click, or configure
-              provider keys for each pipeline stage. Verified credentials persist across page
-              refreshes in the gitignored server vault (<code className="text-zinc-300">data/credentials.json</code>).
+              Calamari Sandwich works 100% natively out of the box. Connect ElevenLabs, Higgsfield,
+              or Gemini Veo here when you want to push scenes, cloned voices, and reference media
+              to external cloud engines. Verified credentials persist in{' '}
+              <code className="text-zinc-300">data/credentials.json</code>.
             </p>
           </div>
 
@@ -142,6 +145,7 @@ export function ConnectorsWorkspace({
                 setDraftKeys({
                   elevenlabs: '',
                   higgsfield: '',
+                  gemini_veo: '',
                   character_cloning: '',
                   script_director_llm: '',
                   music_soundtrack: '',
@@ -306,12 +310,17 @@ export function ConnectorsWorkspace({
                     </div>
                   )}
 
-                  {isConnected && connector.id === 'higgsfield' && (
+                  {(connector.id === 'higgsfield' || connector.id === 'gemini_veo') &&
+                    isConnected && (
                     <div className="flex items-center justify-between text-[11px] text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800/80 px-2.5 py-1.5">
                       <span>
                         Model:{' '}
                         <code className="text-cyan-300 text-[10px]">
-                          {account?.model || connector.model || 'higgsfield-dop-turbo'}
+                          {account?.model ||
+                            connector.model ||
+                            (connector.id === 'gemini_veo'
+                              ? 'veo-2.0-generate-001'
+                              : 'higgsfield-dop-turbo')}
                         </code>
                       </span>
                       <span className="text-[10px] text-emerald-300 font-mono">

@@ -14,6 +14,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Video,
   X,
   XCircle,
 } from 'lucide-react';
@@ -50,6 +51,12 @@ const PORTAL_URLS: Partial<Record<ConnectorId, { url: string; label: string; ins
     instructions:
       'Sign in to Higgsfield Cloud, generate an API Key ID + Key Secret (Key <id>:<secret>) or Bearer token, and verify it below.',
   },
+  gemini_veo: {
+    url: 'https://aistudio.google.com/apikey',
+    label: 'Open Google AI Studio API Keys',
+    instructions:
+      'Sign in to Google AI Studio, create or copy a Gemini API key (GEMINI_API_KEY) for Veo video generation, and verify it below.',
+  },
 };
 
 export function ProviderConnectModal({
@@ -80,7 +87,14 @@ export function ProviderConnectModal({
     setApiKey('');
     setApiSecret('');
     setEndpoint(connector.endpoint || connector.defaultEndpoint || '');
-    setModel(connector.model || (connector.id === 'higgsfield' ? 'higgsfield-dop-turbo' : ''));
+    setModel(
+      connector.model ||
+        (connector.id === 'higgsfield'
+          ? 'higgsfield-dop-turbo'
+          : connector.id === 'gemini_veo'
+            ? 'veo-2.0-generate-001'
+            : '')
+    );
     setShowAdvanced(false);
     setShowSecret(false);
     setError(null);
@@ -109,8 +123,9 @@ export function ProviderConnectModal({
     : null);
 
   const isHiggsfield = connector.id === 'higgsfield';
+  const isGeminiVeo = connector.id === 'gemini_veo';
   const isElevenLabs = connector.id === 'elevenlabs';
-  const Icon = isElevenLabs ? Mic : isHiggsfield ? Film : KeyRound;
+  const Icon = isElevenLabs ? Mic : isGeminiVeo ? Video : isHiggsfield ? Film : KeyRound;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -139,7 +154,7 @@ export function ProviderConnectModal({
             ? apiSecret.trim()
             : undefined,
         endpoint: endpoint.trim() || undefined,
-        model: isHiggsfield && model.trim() ? model.trim() : undefined,
+        model: (isHiggsfield || isGeminiVeo) && model.trim() ? model.trim() : undefined,
       };
       const res = await onConnect(connector.id, payload);
       if (!res.ok) {
@@ -307,7 +322,7 @@ export function ProviderConnectModal({
                 </div>
               )}
 
-              {isHiggsfield && (
+              {(isHiggsfield || isGeminiVeo) && (
                 <div className="space-y-1 pt-1 border-t border-emerald-500/20 text-[11px] text-zinc-300">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-zinc-400">Endpoint</span>
@@ -318,7 +333,9 @@ export function ProviderConnectModal({
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-zinc-400">Model</span>
                     <span className="font-mono text-[10px]">
-                      {account?.model || connector.model || 'higgsfield-dop-turbo'}
+                      {account?.model ||
+                        connector.model ||
+                        (isGeminiVeo ? 'veo-2.0-generate-001' : 'higgsfield-dop-turbo')}
                     </span>
                   </div>
                 </div>
@@ -469,9 +486,11 @@ export function ProviderConnectModal({
                 <label className="block text-[11px] text-zinc-400 mb-1">
                   {isElevenLabs
                     ? 'ElevenLabs API Key (xi-api-key)'
-                    : isHiggsfield
-                      ? 'Higgsfield API Key / Bearer Token or Key <id>:<secret>'
-                      : `${connector.name} API Key`}
+                    : isGeminiVeo
+                      ? 'Gemini API Key (GEMINI_API_KEY)'
+                      : isHiggsfield
+                        ? 'Higgsfield API Key / Bearer Token or Key <id>:<secret>'
+                        : `${connector.name} API Key`}
                 </label>
                 <div className="relative">
                   <input
@@ -482,9 +501,11 @@ export function ProviderConnectModal({
                     placeholder={
                       isElevenLabs
                         ? 'sk_...'
-                        : isHiggsfield
-                          ? 'Key <id>:<secret> or Bearer token'
-                          : 'Paste API key...'
+                        : isGeminiVeo
+                          ? 'AIza...'
+                          : isHiggsfield
+                            ? 'Key <id>:<secret> or Bearer token'
+                            : 'Paste API key...'
                     }
                     className="w-full rounded-lg bg-zinc-950 border border-zinc-800 focus:border-indigo-500 pl-3 pr-9 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
                   />
@@ -524,16 +545,16 @@ export function ProviderConnectModal({
                       className="w-full rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-100 font-mono"
                     />
                   </div>
-                  {isHiggsfield && (
+                  {(isHiggsfield || isGeminiVeo) && (
                     <div>
                       <label className="block text-[10px] text-zinc-400 mb-1">
-                        Higgsfield Model
+                        {isGeminiVeo ? 'Gemini Veo Model' : 'Higgsfield Model'}
                       </label>
                       <input
                         type="text"
                         value={model}
                         onChange={(e) => setModel(e.target.value)}
-                        placeholder="higgsfield-dop-turbo"
+                        placeholder={isGeminiVeo ? 'veo-2.0-generate-001' : 'higgsfield-dop-turbo'}
                         className="w-full rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-100 font-mono"
                       />
                     </div>

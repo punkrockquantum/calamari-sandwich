@@ -9,7 +9,7 @@ interface TopicGeneratorModalProps {
   busy: boolean;
 }
 
-const DURATION_PRESETS = [2, 5, 10, 15, 20, 30];
+const DURATION_PRESETS = [1, 2, 5, 10, 15, 20, 30];
 
 const SAMPLE_TOPICS = [
   'How Transformer Attention & KV Caching Work',
@@ -31,7 +31,17 @@ export function TopicGeneratorModal({
   if (!open) return null;
 
   const estimatedChapters =
-    durationMinutes <= 3 ? 3 : durationMinutes <= 6 ? 4 : durationMinutes <= 12 ? 6 : durationMinutes <= 20 ? 8 : 10;
+    durationMinutes === 1
+      ? 2
+      : durationMinutes <= 3
+        ? 3
+        : durationMinutes <= 6
+          ? 4
+          : durationMinutes <= 12
+            ? 6
+            : durationMinutes <= 20
+              ? 8
+              : 10;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,7 +57,7 @@ export function TopicGeneratorModal({
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-indigo-400" />
             <h2 className="text-sm font-semibold text-zinc-100">
-              New Tech-Explainer Generator (2–30 min)
+              New Tech-Explainer Generator (1–30 min)
             </h2>
           </div>
           <button
@@ -96,7 +106,7 @@ export function TopicGeneratorModal({
               </span>
             </div>
 
-            <div className="grid grid-cols-6 gap-1.5 mb-2.5">
+            <div className="grid grid-cols-7 gap-1.5 mb-2.5">
               {DURATION_PRESETS.map((min) => (
                 <button
                   key={min}
@@ -115,7 +125,7 @@ export function TopicGeneratorModal({
 
             <input
               type="range"
-              min={2}
+              min={1}
               max={30}
               value={durationMinutes}
               onChange={(e) => setDurationMinutes(Number(e.target.value))}

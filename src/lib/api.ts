@@ -6,7 +6,10 @@ import type {
   HiggsfieldJobState,
   MusicTrack,
   ProviderStatus,
+  PushVoiceElevenLabsResult,
+  RagContextMatch,
   SceneItem,
+  TechAsset,
   VoiceProfile,
 } from '@shared/types';
 import {
@@ -193,6 +196,91 @@ export const studioApi = {
   ) {
     return requestJson<{ project: ExplainerProject; higgsfield: HiggsfieldJobState }>(
       `/api/higgsfield/jobs/${encodeURIComponent(projectId)}/${encodeURIComponent(sceneId)}`,
+      undefined,
+      keys
+    );
+  },
+
+  cloneVoice(formData: FormData) {
+    return requestJson<{ voice: VoiceProfile }>('/api/voices/clone', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  deleteVoice(voiceId: string) {
+    return requestJson<{ deleted: boolean }>(
+      `/api/voices/${encodeURIComponent(voiceId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  pushVoiceToElevenLabs(voiceId: string, keys?: Partial<SessionConnectorKeys>) {
+    return requestJson<PushVoiceElevenLabsResult>(
+      `/api/voices/${encodeURIComponent(voiceId)}/push-elevenlabs`,
+      { method: 'POST' },
+      keys
+    );
+  },
+
+  listAssets() {
+    return requestJson<{ assets: TechAsset[] }>('/api/assets');
+  },
+
+  uploadAsset(formData: FormData) {
+    return requestJson<{ asset: TechAsset }>('/api/assets', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  deleteAsset(assetId: string) {
+    return requestJson<{ deleted: boolean }>(
+      `/api/assets/${encodeURIComponent(assetId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  retrieveRagContext(query: string, projectId?: string, limit = 5) {
+    return requestJson<{ matches: RagContextMatch[] }>('/api/assets/retrieve', {
+      method: 'POST',
+      body: JSON.stringify({ query, projectId, limit }),
+    });
+  },
+
+  pushSceneToProvider(
+    provider: 'higgsfield' | 'gemini_veo',
+    projectId: string,
+    sceneId: string,
+    characterId?: string,
+    keys?: Partial<SessionConnectorKeys>
+  ) {
+    return requestJson<{
+      project: ExplainerProject;
+      job: HiggsfieldJobState;
+      provider: 'higgsfield' | 'gemini_veo';
+    }>(
+      '/api/providers/push',
+      {
+        method: 'POST',
+        body: JSON.stringify({ provider, projectId, sceneId, characterId }),
+      },
+      keys
+    );
+  },
+
+  pollProviderJob(
+    projectId: string,
+    sceneId: string,
+    provider: 'higgsfield' | 'gemini_veo',
+    keys?: Partial<SessionConnectorKeys>
+  ) {
+    return requestJson<{
+      project: ExplainerProject;
+      job: HiggsfieldJobState;
+      provider: 'higgsfield' | 'gemini_veo';
+    }>(
+      `/api/providers/jobs/${encodeURIComponent(projectId)}/${encodeURIComponent(sceneId)}/${encodeURIComponent(provider)}`,
       undefined,
       keys
     );

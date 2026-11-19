@@ -55,14 +55,27 @@ export interface CharacterProfile {
   createdAt: string;
 }
 
+export interface VoiceTraits {
+  tone: string;
+  pitch: 'low' | 'medium' | 'high';
+  warmth: number;
+  cadence: 'measured' | 'conversational' | 'brisk';
+}
+
 export interface VoiceProfile {
   voice_id: string;
   name: string;
   category: string;
-  source: 'elevenlabs' | 'mock';
+  source: 'elevenlabs' | 'native' | 'mock';
   labels: Record<string, string>;
   preview_url?: string;
   description?: string;
+  sampleUrl?: string;
+  sampleMimeType?: string;
+  traits?: VoiceTraits;
+  elevenlabsVoiceId?: string;
+  pushStatus?: 'local' | 'pushed' | 'export-ready';
+  createdAt?: string;
 }
 
 export interface MusicTrack {
@@ -79,15 +92,48 @@ export interface MusicTrack {
 
 export interface HiggsfieldJobState {
   status: 'idle' | 'queued' | 'generating' | 'rendering' | 'ready' | 'failed' | 'fallback';
-  provider: 'higgsfield' | 'canvas-fallback';
+  provider: 'higgsfield' | 'gemini_veo' | 'canvas-fallback';
   jobId?: string;
   statusUrl?: string;
   videoUrl?: string;
   model?: string;
   endpoint?: string;
+  attachedMediaUrls?: string[];
   errorMessage?: string;
   renderNote?: string;
   updatedAt: string;
+}
+
+export type TechAssetCategory =
+  | 'hardware'
+  | 'server-rack'
+  | 'architecture-diagram'
+  | 'lab-environment'
+  | 'product-demo'
+  | 'reference-clip';
+
+export interface TechAsset {
+  id: string;
+  name: string;
+  category: TechAssetCategory;
+  sourceType: 'photos' | 'video';
+  mediaUrls: string[];
+  description: string;
+  technicalSpecs: string;
+  tags: string[];
+  createdAt: string;
+}
+
+export interface RagContextMatch {
+  sourceType: 'asset' | 'character' | 'scene';
+  id: string;
+  name: string;
+  category: string;
+  score: number;
+  matchedTerms: string[];
+  snippet: string;
+  mediaUrl?: string;
+  mediaType?: 'image' | 'video';
 }
 
 export interface SceneItem {
@@ -108,6 +154,10 @@ export interface SceneItem {
   voiceAudioUrl?: string;
   voiceStatus: 'pending' | 'synthesized' | 'fallback';
   higgsfield: HiggsfieldJobState;
+  veo?: HiggsfieldJobState;
+  activeVideoProvider?: 'higgsfield' | 'gemini_veo';
+  assetIds?: string[];
+  ragContext?: RagContextMatch[];
   keyPoints: string[];
 }
 
@@ -129,6 +179,7 @@ export interface ProjectStateSnapshot {
   scenes: SceneItem[];
   characters: CharacterProfile[];
   musicTracks: MusicTrack[];
+  assetIds?: string[];
 }
 
 export interface IterationSnapshot {
@@ -137,6 +188,7 @@ export interface IterationSnapshot {
   prompt: string;
   summary: string;
   actions: string[];
+  ragContextUsed?: RagContextMatch[];
   projectState: ProjectStateSnapshot;
 }
 
@@ -170,11 +222,16 @@ export interface ProviderStatus {
     configured: boolean;
     source: 'env' | 'vault' | 'session' | 'fallback';
   };
+  gemini_veo?: {
+    configured: boolean;
+    source: 'env' | 'vault' | 'session' | 'fallback';
+  };
 }
 
 export type ConnectorId =
   | 'elevenlabs'
   | 'higgsfield'
+  | 'gemini_veo'
   | 'character_cloning'
   | 'script_director_llm'
   | 'music_soundtrack';
@@ -240,6 +297,7 @@ export interface GenerateProjectRequest {
   title?: string;
   primaryVoiceId?: string;
   characterIds?: string[];
+  assetIds?: string[];
 }
 
 export interface DirectorPromptRequest {
@@ -250,5 +308,22 @@ export interface DirectorPromptResult {
   project: ExplainerProject;
   summary: string;
   actions: string[];
+  ragContextUsed?: RagContextMatch[];
   higgsfieldTargetSceneIds?: string[];
+  veoTargetSceneIds?: string[];
+}
+
+export interface PushVoiceElevenLabsResult {
+  ok: boolean;
+  mode: 'pushed' | 'export-ready';
+  elevenlabsVoiceId?: string;
+  voice: VoiceProfile;
+  message: string;
+  workflowExport?: {
+    endpoint: string;
+    method: 'POST';
+    headers: Record<string, string>;
+    sampleUrl?: string;
+    payload: Record<string, unknown>;
+  };
 }

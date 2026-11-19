@@ -9,9 +9,11 @@ import type {
   MusicTrack,
   ProjectStateSnapshot,
   SceneItem,
+  TechAsset,
   TransitionType,
 } from '../../shared/types.js';
 import { buildClonedCharacter } from './characterService.js';
+import { retrieveRagContext } from './ragContext.js';
 import { generateExplainerProject } from './scriptGenerator.js';
 
 export function extractProjectSnapshot(project: ExplainerProject): ProjectStateSnapshot {
@@ -96,7 +98,8 @@ function extractTargetSceneIndex(prompt: string, totalScenes: number): number | 
 
 export function applyDirectorPrompt(
   project: ExplainerProject,
-  rawPrompt: string
+  rawPrompt: string,
+  assets: TechAsset[] = []
 ): DirectorPromptResult {
   const prompt = rawPrompt.trim();
   if (!prompt) {
@@ -107,10 +110,21 @@ export function applyDirectorPrompt(
   const next = structuredClone(project);
   const actions: string[] = [];
 
-  // 1. Duration change (2-30 min)
+  const ragContextUsed = retrieveRagContext({
+    query: `${prompt} ${next.topic}`,
+    assets,
+    characters: next.characters,
+    scenes: next.scenes,
+    limit: 3,
+  });
+  const retrievedAssetIds = ragContextUsed
+    .filter((m) => m.sourceType === 'asset')
+    .map((m) => m.id);
+
+  // 1. Duration change (1-30 min)
   const durationMatch = lower.match(/(?:duration|make it|set.*to|expand to|trim to)\s*(\d+)\s*(?:min|minute|minutes|m\b)/i);
   if (durationMatch) {
-    const requestedMin = Math.max(2, Math.min(30, Number.parseInt(durationMatch[1], 10)));
+    const requestedMin = Math.max(1, Math.min(30, Number.parseInt(durationMatch[1], 10)));
     const regenerated = generateExplainerProject({
       topic: next.topic,
       durationMinutes: requestedMin,
@@ -118,6 +132,7 @@ export function applyDirectorPrompt(
       title: `${next.topic} — ${requestedMin}m Explainer`,
       primaryVoiceId: next.primaryVoiceId,
       characters: next.characters,
+      assets,
     });
     next.targetDurationMinutes = requestedMin;
     next.title = regenerated.title;
@@ -222,6 +237,11 @@ export function applyDirectorPrompt(
       targetDurationSec: durationSec,
     };
 
+    const ragVisualNote =
+      ragContextUsed.length > 0
+        ? ` Grounded with RAG context: ${ragContextUsed.map((r) => r.name).join(', ')}.`
+        : '';
+
     const newScene: SceneItem = {
       id: `scene-${next.scenes.length + 1}-${crypto.randomUUID().slice(0, 6)}`,
       chapterId: lastChapter.id,
@@ -229,7 +249,7 @@ export function applyDirectorPrompt(
       title: `${next.chapters.length}.${next.scenes.length + 1} ${sceneSubject.slice(0, 42)}`,
       durationSec,
       narration: `Let us zoom in on ${sceneSubject}. By breaking this down visually, we can immediately see how each layer transforms inputs cleanly while keeping system invariants intact.`,
-      visualPrompt: `Higgsfield ${cinematicStyle} scene showcasing ${sceneSubject}, ${cameraMotion} camera move, glowing telemetry nodes, sharp 16:9 framing.`,
+      visualPrompt: `Higgsfield ${cinematicStyle} scene showcasing ${sceneSubject}, ${cameraMotion} camera move, glowing telemetry nodes, sharp 16:9 framing.${ragVisualNote}`,
       visualOverlay: lower.includes('code')
         ? 'code-terminal'
         : lower.includes('packet') || lower.includes('network')
@@ -248,10 +268,13 @@ export function applyDirectorPrompt(
         renderNote: `Director-added scene (${cameraMotion} • ${cinematicStyle}).`,
         updatedAt: new Date().toISOString(),
       },
+      assetIds: retrievedAssetIds,
+      ragContext: ragContextUsed,
       keyPoints: [
         sceneSubject,
         `Camera: ${cameraMotion}`,
         `Style: ${cinematicStyle}`,
+        ...(ragContextUsed[0] ? [`RAG Context: ${ragContextUsed[0].name}`] : []),
       ],
     };
 
@@ -279,18 +302,23 @@ export function applyDirectorPrompt(
   const transitionUpdate = matchTransition(prompt);
   const placementUpdate = matchPlacement(prompt);
   const isAddingScene = actions.some((a) => a.startsWith('Added Scene'));
-  const wantsHiggsfieldRender = /\b(higgsfield|render|generate.*video|generate.*cinematic|cinematic render)\b/i.test(
-    lower
-  );
+  const wantsVeoRender = /\b(veo|gemini\s*veo)\b/i.test(lower);
+  const wantsHiggsfieldRender =
+    !wantsVeoRender &&
+    /\b(higgsfield|render|generate.*video|generate.*cinematic|cinematic render)\b/i.test(lower);
   const higgsfieldTargetSceneIds: string[] = [];
-  if (wantsHiggsfieldRender) {
-    if (isAddingScene && next.scenes.length > 0) {
-      higgsfieldTargetSceneIds.push(next.scenes[next.scenes.length - 1].id);
-    } else if (targetIdx !== undefined && next.scenes[targetIdx]) {
-      higgsfieldTargetSceneIds.push(next.scenes[targetIdx].id);
-    } else if (next.scenes[0]) {
-      higgsfieldTargetSceneIds.push(next.scenes[0].id);
-    }
+  const veoTargetSceneIds: string[] = [];
+  const resolveTargetId = () => {
+    if (isAddingScene && next.scenes.length > 0) return next.scenes[next.scenes.length - 1].id;
+    if (targetIdx !== undefined && next.scenes[targetIdx]) return next.scenes[targetIdx].id;
+    return next.scenes[0]?.id;
+  };
+  if (wantsVeoRender) {
+    const id = resolveTargetId();
+    if (id) veoTargetSceneIds.push(id);
+  } else if (wantsHiggsfieldRender) {
+    const id = resolveTargetId();
+    if (id) higgsfieldTargetSceneIds.push(id);
   }
 
   if (!isAddingScene && (cameraUpdate || styleUpdate || transitionUpdate || placementUpdate || targetIdx !== undefined)) {
@@ -365,9 +393,18 @@ export function applyDirectorPrompt(
     actions.push(`Applied creative direction "${prompt.slice(0, 64)}" to Scene ${focusIdx + 1}`);
   }
 
+  // Attach RAG context to modified target scene if not already added
+  if (!isAddingScene && ragContextUsed.length > 0) {
+    const sc = targetIdx !== undefined ? next.scenes[targetIdx] : next.scenes[0];
+    if (sc) {
+      sc.ragContext = ragContextUsed;
+      sc.assetIds = Array.from(new Set([...(sc.assetIds || []), ...retrievedAssetIds]));
+    }
+  }
+
   // Recompute total target minutes roughly if scenes changed
   const totalSec = next.scenes.reduce((acc, sc) => acc + sc.durationSec, 0);
-  next.targetDurationMinutes = Math.max(2, Math.min(30, Math.round(totalSec / 60)));
+  next.targetDurationMinutes = Math.max(1, Math.min(30, Math.round(totalSec / 60)));
 
   const summary = actions.join('; ');
   const now = new Date().toISOString();
@@ -378,6 +415,7 @@ export function applyDirectorPrompt(
     prompt,
     summary,
     actions,
+    ragContextUsed: ragContextUsed.length > 0 ? ragContextUsed : undefined,
     projectState: extractProjectSnapshot(next),
   };
 
@@ -389,7 +427,9 @@ export function applyDirectorPrompt(
     project: next,
     summary,
     actions,
+    ragContextUsed: ragContextUsed.length > 0 ? ragContextUsed : undefined,
     higgsfieldTargetSceneIds,
+    veoTargetSceneIds,
   };
 }
 

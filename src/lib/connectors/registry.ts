@@ -15,6 +15,7 @@ const STORAGE_DEMO_PREFS = 'calamari_sandwich_demo_prefs';
 export const CONNECTOR_IDS: ConnectorId[] = [
   'elevenlabs',
   'higgsfield',
+  'gemini_veo',
   'character_cloning',
   'script_director_llm',
   'music_soundtrack',
@@ -23,6 +24,7 @@ export const CONNECTOR_IDS: ConnectorId[] = [
 export const CONNECTOR_SESSION_HEADERS: Record<ConnectorId, string> = {
   elevenlabs: 'x-elevenlabs-key',
   higgsfield: 'x-higgsfield-key',
+  gemini_veo: 'x-gemini-veo-key',
   character_cloning: 'x-character-clone-key',
   script_director_llm: 'x-director-llm-key',
   music_soundtrack: 'x-music-key',
@@ -32,6 +34,7 @@ export function createEmptySessionConnectorKeys(): SessionConnectorKeys {
   return {
     elevenlabs: '',
     higgsfield: '',
+    gemini_veo: '',
     character_cloning: '',
     script_director_llm: '',
     music_soundtrack: '',
@@ -42,6 +45,7 @@ export function createDefaultDemoPrefs(): DemoFallbackPrefs {
   return {
     elevenlabs: true,
     higgsfield: true,
+    gemini_veo: true,
     character_cloning: true,
     script_director_llm: true,
     music_soundtrack: true,
