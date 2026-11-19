@@ -13,6 +13,7 @@ import type {
   RagContextMatch,
   SceneItem,
   TechAsset,
+  TimelineDropRequest,
   TtsBrowserFallback,
   VoicePlaybackMode,
   VoiceProfile,
@@ -81,6 +82,48 @@ export const studioApi = {
     );
   },
 
+  reorderScenes(projectId: string, sceneIds: string[], historySummary?: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes/reorder`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ sceneIds, historySummary }),
+      }
+    );
+  },
+
+  createScene(
+    projectId: string,
+    payload: {
+      title?: string;
+      durationSec?: number;
+      narration?: string;
+      visualPrompt?: string;
+      assetIds?: string[];
+      sourceId?: string;
+      sourceSlideIndex?: number;
+      generatedVisualUrl?: string;
+      characterId?: string;
+      voiceId?: string;
+      insertAtIndex?: number;
+    }
+  ) {
+    return requestJson<{ project: ExplainerProject; scene: SceneItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  deleteScene(projectId: string, sceneId: string) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
   setProjectPrimaryVoice(projectId: string, voiceId: string, applyToAllScenes = true) {
     return requestJson<{ project: ExplainerProject }>(
       `/api/projects/${encodeURIComponent(projectId)}/primary-voice`,
@@ -120,10 +163,30 @@ export const studioApi = {
     );
   },
 
+  updateMusicTrack(projectId: string, trackId: string, patch: Partial<MusicTrack>) {
+    return requestJson<{ project: ExplainerProject; track: MusicTrack }>(
+      `/api/projects/${encodeURIComponent(projectId)}/music/${encodeURIComponent(trackId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
+  },
+
   deleteMusicTrack(projectId: string, trackId: string) {
     return requestJson<{ project: ExplainerProject }>(
       `/api/projects/${encodeURIComponent(projectId)}/music/${encodeURIComponent(trackId)}`,
       { method: 'DELETE' }
+    );
+  },
+
+  dropOnTimeline(projectId: string, payload: TimelineDropRequest) {
+    return requestJson<{ project: ExplainerProject; summary: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/timeline/drop`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
     );
   },
 

@@ -15,6 +15,8 @@ import type {
   RagContextMatch,
   SceneItem,
   TechAsset,
+  TimelineDragPayload,
+  TimelineDropRequest,
   TtsBrowserFallback,
   VoicePlaybackMode,
   VoiceProfile,
@@ -53,12 +55,13 @@ import { AssetUploadModal } from '@/components/AssetUploadModal';
 import { CharacterCloningModal } from '@/components/CharacterCloningModal';
 import { ConnectorsWorkspace } from '@/components/ConnectorsWorkspace';
 import { DirectorPromptBar } from '@/components/DirectorPromptBar';
-import { InspectorPanel } from '@/components/InspectorPanel';
+import { ExplainerWizardModal } from '@/components/ExplainerWizardModal';
+import { InspectorPanel, type InspectorTab } from '@/components/InspectorPanel';
 import { IterationHistoryDrawer } from '@/components/IterationHistoryDrawer';
-import { MultiTrackTimeline } from '@/components/MultiTrackTimeline';
 import { PreviewPlayer } from '@/components/PreviewPlayer';
 import { ProviderConnectModal } from '@/components/ProviderConnectModal';
 import { SourceImportModal } from '@/components/SourceImportModal';
+import { Timeline, type SelectedTimelineBlock } from '@/components/Timeline';
 import { TopBar, type WorkspaceView } from '@/components/TopBar';
 import { TopicGeneratorModal } from '@/components/TopicGeneratorModal';
 import { VoiceCloningModal } from '@/components/VoiceCloningModal';
@@ -100,12 +103,19 @@ export function App() {
   >(null);
 
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showWizardModal, setShowWizardModal] = useState(false);
   const [showCloneModal, setShowCloneModal] = useState(false);
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [connectModalId, setConnectModalId] = useState<ConnectorId | null>(null);
+
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('scene');
+  const [selectedTimelineBlock, setSelectedTimelineBlock] =
+    useState<SelectedTimelineBlock | null>(null);
+  const [selectedMusicTrackId, setSelectedMusicTrackId] = useState<string | null>(null);
+  const [draggingPayload, setDraggingPayload] = useState<TimelineDragPayload | null>(null);
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [lastActionSummary, setLastActionSummary] = useState<string | null>(null);
@@ -295,10 +305,10 @@ export function App() {
 
   // Synchronized ElevenLabs / Native Cloned / System Speech voiceover playback during timeline playback
   useEffect(() => {
-    if (!isPlaying || isMuted || !activeProject?.id || !activeScene) {
+    if (!isPlaying || isMuted || !activeProject?.id || !activeScene || activeScene.voiceEnabled === false) {
       stopVoiceAudio();
       lastSpokenSceneKeyRef.current = null;
-      if (!isPlaying || isMuted) {
+      if (!isPlaying || isMuted || activeScene?.voiceEnabled === false) {
         setActiveVoiceSource(null);
         setActiveVoiceMode(null);
       }
@@ -442,6 +452,7 @@ export function App() {
     activeScene?.voiceId,
     activeScene?.voicePlaybackMode,
     activeScene?.narration,
+    activeScene?.voiceEnabled,
     seekEpoch,
     voices,
   ]);
@@ -589,21 +600,76 @@ export function App() {
     }
   };
 
-  const handleUpdateScene = async (sceneId: string, patch: Partial<SceneItem>) => {
+  const handleUpdateScene = async (sceneId: string, patch: Record<string, unknown>) => {
     if (!activeProject) return;
     try {
-      const { project } = await studioApi.updateScene(activeProject.id, sceneId, patch);
+      const { project } = await studioApi.updateScene(
+        activeProject.id,
+        sceneId,
+        patch as Partial<SceneItem>
+      );
       upsertProject(project);
       if (
         patch.voiceId !== undefined ||
         patch.narration !== undefined ||
-        patch.voicePlaybackMode !== undefined
+        patch.voicePlaybackMode !== undefined ||
+        patch.voiceEnabled !== undefined
       ) {
         clearVoiceCache();
         lastSpokenSceneKeyRef.current = null;
       }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Scene update failed.');
+    }
+  };
+
+  const handleReorderScenes = async (sceneIds: string[]) => {
+    if (!activeProject) return;
+    try {
+      const { project } = await studioApi.reorderScenes(activeProject.id, sceneIds);
+      upsertProject(project);
+      setLastActionSummary('Reordered scenes on timeline');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to reorder scenes.');
+    }
+  };
+
+  const handleDeleteScene = async (sceneId: string) => {
+    if (!activeProject) return;
+    try {
+      const { project } = await studioApi.deleteScene(activeProject.id, sceneId);
+      upsertProject(project);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
+      setLastActionSummary('Deleted scene from timeline');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to delete scene.');
+    }
+  };
+
+  const handleUpdateMusicTrack = async (trackId: string, patch: Partial<MusicTrack>) => {
+    if (!activeProject) return;
+    try {
+      const { project } = await studioApi.updateMusicTrack(activeProject.id, trackId, patch);
+      upsertProject(project);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update music track.');
+    }
+  };
+
+  const handleDropOnTimeline = async (req: TimelineDropRequest) => {
+    if (!activeProject) return;
+    setDraggingPayload(null);
+    try {
+      const res = await studioApi.dropOnTimeline(activeProject.id, req);
+      upsertProject(res.project);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
+      if (res.summary) {
+        setLastActionSummary(res.summary);
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Timeline drop failed.');
     }
   };
 
@@ -918,7 +984,7 @@ export function App() {
   const handleCloneVoice = async (
     formData: FormData,
     options?: { setAsActiveExplainerVoice: boolean }
-  ) => {
+  ): Promise<VoiceProfile> => {
     setBusyAction('clone-voice');
     try {
       const { voice, project: serverUpdatedProject } = await studioApi.cloneVoice(formData);
@@ -935,17 +1001,13 @@ export function App() {
           true
         );
         upsertProject(updated.project);
-      } else if (activeProject && activeScene) {
-        const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
-          voiceId: voice.voice_id,
-        });
-        upsertProject(updated.project);
       }
       setLastActionSummary(
         shouldActivate
           ? `Cloned "${voice.name}" and activated as explainer voice across all scenes`
           : `Cloned native voice "${voice.name}"`
       );
+      return voice;
     } finally {
       setBusyAction(null);
     }
@@ -1301,6 +1363,7 @@ export function App() {
           setIsPlaying(false);
         }}
         onOpenNewProject={() => setShowNewModal(true)}
+        onOpenWizard={() => setShowWizardModal(true)}
         onOpenCharacterClone={() => setShowCloneModal(true)}
         onOpenVoiceClone={() => setShowVoiceModal(true)}
         onOpenHistory={() => setShowHistoryDrawer(true)}
@@ -1398,6 +1461,11 @@ export function App() {
               allCharacters={allCharacters}
               assets={assets}
               sources={sources}
+              activeTab={inspectorTab}
+              onTabChange={setInspectorTab}
+              selectedMusicTrackId={selectedMusicTrackId}
+              onDragStartPayload={setDraggingPayload}
+              onDragEndPayload={() => setDraggingPayload(null)}
               lastVoicePushResult={lastVoicePushResult}
               onUpdateScene={handleUpdateScene}
               onTriggerHiggsfield={handleTriggerHiggsfield}
@@ -1422,27 +1490,56 @@ export function App() {
               onGenerateFromSource={handleGenerateFromSource}
               onDeleteAsset={handleDeleteAsset}
               onAddMusicTrack={handleAddMusicTrack}
+              onUpdateMusicTrack={handleUpdateMusicTrack}
               onDeleteMusicTrack={handleDeleteMusicTrack}
               busyAction={busyAction}
             />
           </div>
 
           {/* Bottom 4-Track Timeline */}
-          <MultiTrackTimeline
+          <Timeline
             project={activeProject}
+            voices={voices}
+            allCharacters={allCharacters}
             currentTimeSec={currentTimeSec}
             activeSceneId={activeScene?.id || ''}
-            onSelectScene={(sceneId, startSec) => {
+            selectedBlock={selectedTimelineBlock}
+            draggingPayload={draggingPayload}
+            onSelectBlock={(block, startSec) => {
+              setSelectedTimelineBlock(block);
+              if (!block) return;
               lastSpokenSceneKeyRef.current = null;
               setSeekEpoch((e) => e + 1);
-              setActiveSceneId(sceneId);
-              setCurrentTimeSec(startSec);
+              if (startSec !== undefined) {
+                setCurrentTimeSec(startSec);
+              }
+              if (block.track === 'music') {
+                setSelectedMusicTrackId(block.id);
+                setInspectorTab('music');
+              } else {
+                setSelectedMusicTrackId(null);
+                setActiveSceneId(block.id);
+                setInspectorTab(
+                  block.track === 'character'
+                    ? 'characters'
+                    : block.track === 'voiceover'
+                      ? 'voices'
+                      : 'scene'
+                );
+              }
             }}
             onSeek={(sec) => {
               lastSpokenSceneKeyRef.current = null;
               setSeekEpoch((e) => e + 1);
               setCurrentTimeSec(sec);
             }}
+            onUpdateScene={handleUpdateScene}
+            onReorderScenes={handleReorderScenes}
+            onDeleteScene={handleDeleteScene}
+            onUpdateMusicTrack={handleUpdateMusicTrack}
+            onDeleteMusicTrack={handleDeleteMusicTrack}
+            onDropItem={handleDropOnTimeline}
+            onPreviewVoice={handlePreviewVoice}
           />
         </main>
       )}
@@ -1455,6 +1552,28 @@ export function App() {
         onClose={() => setShowNewModal(false)}
         onGenerate={handleGenerateProject}
         onOpenSourceImport={() => setShowSourceModal(true)}
+        busy={busyAction === 'generate'}
+      />
+
+      <ExplainerWizardModal
+        open={showWizardModal}
+        voices={voices}
+        sources={sources}
+        assets={assets}
+        characters={
+          allCharacters.length > 0 ? allCharacters : activeProject.characters
+        }
+        activeVoiceId={activeProject.primaryVoiceId || activeScene?.voiceId}
+        onClose={() => setShowWizardModal(false)}
+        onAssemble={handleGenerateProject}
+        onCloneVoice={handleCloneVoice}
+        onImportPptx={handleImportPptxSource}
+        onImportNotebookLm={handleImportNotebookLmSource}
+        onPreviewVoice={handlePreviewVoice}
+        onOpenCharacterClone={() => setShowCloneModal(true)}
+        onAssetCreated={(asset) =>
+          setAssets((prev) => [asset, ...prev.filter((a) => a.id !== asset.id)])
+        }
         busy={busyAction === 'generate'}
       />
 

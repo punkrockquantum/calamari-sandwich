@@ -10,7 +10,7 @@ import {
   Volume2,
   X,
 } from 'lucide-react';
-import type { VoicePlaybackMode, VoiceTraits } from '@shared/types';
+import type { VoicePlaybackMode, VoiceProfile, VoiceTraits } from '@shared/types';
 
 interface VoiceCloningModalProps {
   open: boolean;
@@ -19,7 +19,7 @@ interface VoiceCloningModalProps {
   onCloneVoice: (
     formData: FormData,
     options?: { setAsActiveExplainerVoice: boolean }
-  ) => Promise<void>;
+  ) => Promise<VoiceProfile | void>;
   busy: boolean;
 }
 

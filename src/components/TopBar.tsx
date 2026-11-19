@@ -8,6 +8,7 @@ import {
   Sparkles,
   Undo2,
   UserPlus,
+  Wand2,
 } from 'lucide-react';
 import type { ConnectorDescriptor, ExplainerProject } from '@shared/types';
 
@@ -21,6 +22,7 @@ interface TopBarProps {
   onChangeView: (view: WorkspaceView) => void;
   onSelectProject: (id: string) => void;
   onOpenNewProject: () => void;
+  onOpenWizard: () => void;
   onOpenCharacterClone: () => void;
   onOpenVoiceClone: () => void;
   onOpenHistory: () => void;
@@ -37,6 +39,7 @@ export function TopBar({
   onChangeView,
   onSelectProject,
   onOpenNewProject,
+  onOpenWizard,
   onOpenCharacterClone,
   onOpenVoiceClone,
   onOpenHistory,
@@ -119,6 +122,16 @@ export function TopBar({
         >
           <Plus className="w-3.5 h-3.5" />
           New Explainer
+        </button>
+
+        <button
+          type="button"
+          data-testid="topbar-wizard-btn"
+          onClick={onOpenWizard}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/45 bg-cyan-500/15 hover:bg-cyan-500/25 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition shrink-0"
+        >
+          <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
+          Wizard
         </button>
 
         <div className="hidden 2xl:flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-[11px] text-zinc-300 shrink-0">

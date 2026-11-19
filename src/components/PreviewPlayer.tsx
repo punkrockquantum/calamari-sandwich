@@ -222,9 +222,32 @@ export function PreviewPlayer({
   const activeChapter: ChapterItem | undefined = project.chapters.find(
     (c) => c.id === activeScene?.chapterId
   );
-  const activeCharacter: CharacterProfile | undefined = project.characters.find(
-    (c) => c.id === activeScene?.characterId
-  );
+  const activeCharacterEntry = useMemo(() => {
+    for (const entry of sceneOffsets) {
+      const sc = entry.scene;
+      if (!sc.characterId || sc.characterPlacement === 'offscreen') continue;
+      const charStart = sc.characterStartSec ?? entry.startSec;
+      const charDur = sc.characterDurationSec ?? sc.durationSec;
+      if (currentTimeSec >= charStart && currentTimeSec < charStart + charDur) {
+        return { scene: sc, character: project.characters.find((c) => c.id === sc.characterId) };
+      }
+    }
+    if (
+      activeScene &&
+      activeScene.characterId &&
+      activeScene.characterPlacement !== 'offscreen' &&
+      activeScene.characterStartSec === undefined
+    ) {
+      return {
+        scene: activeScene,
+        character: project.characters.find((c) => c.id === activeScene.characterId),
+      };
+    }
+    return undefined;
+  }, [sceneOffsets, currentTimeSec, project.characters, activeScene]);
+  const activeCharacter: CharacterProfile | undefined = activeCharacterEntry?.character;
+  const activeCharacterPlacement =
+    activeCharacterEntry?.scene.characterPlacement ?? activeScene?.characterPlacement ?? 'offscreen';
 
   const sceneAssets = useMemo(() => {
     if (!activeScene) return [];
@@ -453,10 +476,10 @@ export function PreviewPlayer({
           ctx.fillRect(0, 0, w, h);
 
           // Visual tech diagram / asset / native keyframed animation region
-          const charLeft = activeScene.characterPlacement === 'left';
-          const charOff = !activeCharacter || activeScene.characterPlacement === 'offscreen';
+          const charLeft = activeCharacterPlacement === 'left';
+          const charOff = !activeCharacter || activeCharacterPlacement === 'offscreen';
           const diagCenterX =
-            activeScene.characterPlacement === 'center'
+            activeCharacterPlacement === 'center'
               ? w * 0.5
               : charOff
                 ? w * 0.34
@@ -812,7 +835,7 @@ export function PreviewPlayer({
           ctx.restore();
 
           // Animated Bullet Reveals card (keyPoints) placed neatly above character or opposite side
-          if (activeScene.keyPoints && activeScene.keyPoints.length > 0 && activeScene.characterPlacement !== 'center') {
+          if (activeScene.keyPoints && activeScene.keyPoints.length > 0 && activeCharacterPlacement !== 'center') {
             const bullets = activeScene.keyPoints.slice(0, 3);
             const cardW = 350;
             const cardH = 34 + bullets.length * 28;
@@ -852,17 +875,17 @@ export function PreviewPlayer({
           }
 
           // Render cloned character on stage if not offscreen
-          if (activeCharacter && activeScene.characterPlacement !== 'offscreen') {
+          if (activeCharacter && activeCharacterPlacement !== 'offscreen') {
             const cx =
-              activeScene.characterPlacement === 'left'
+              activeCharacterPlacement === 'left'
                 ? w * 0.19
-                : activeScene.characterPlacement === 'center'
+                : activeCharacterPlacement === 'center'
                   ? w * 0.5
-                  : activeScene.characterPlacement === 'split'
+                  : activeCharacterPlacement === 'split'
                     ? w * 0.8
                     : w * 0.81;
-            const cy = activeScene.characterPlacement === 'center' ? h * 0.5 : h * 0.57;
-            const radius = activeScene.characterPlacement === 'center' ? 72 : 58;
+            const cy = activeCharacterPlacement === 'center' ? h * 0.5 : h * 0.57;
+            const radius = activeCharacterPlacement === 'center' ? 72 : 58;
 
             const speakAmp = isPlaying ? 1 + Math.abs(Math.sin(t * 7.5)) * 0.14 : 1.03;
             ctx.strokeStyle = activeCharacter.previewColor;
@@ -1006,7 +1029,7 @@ export function PreviewPlayer({
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [activeScene, activeEntry, activeChapter, activeCharacter, activeVisualUrl, activeVisualLabel, activeVisualSpecs, isPlaying, exportingVideo]);
+  }, [activeScene, activeEntry, activeChapter, activeCharacter, activeCharacterPlacement, activeVisualUrl, activeVisualLabel, activeVisualSpecs, isPlaying, exportingVideo]);
 
   const activeIndex = sceneOffsets.findIndex((e) => e.scene.id === activeScene?.id);
 

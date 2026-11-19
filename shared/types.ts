@@ -197,6 +197,7 @@ export interface SceneItem {
   order: number;
   title: string;
   durationSec: number;
+  trimStartSec?: number;
   narration: string;
   visualPrompt: string;
   visualOverlay: SceneVisualOverlay;
@@ -209,10 +210,16 @@ export interface SceneItem {
   transitionIn: TransitionType;
   characterId?: string;
   characterPlacement: CharacterPlacement;
+  characterStartSec?: number;
+  characterDurationSec?: number;
   voiceId: string;
   voicePlaybackMode?: 'auto' | VoicePlaybackMode;
   voiceAudioUrl?: string;
   voiceStatus: 'pending' | 'synthesized' | 'fallback';
+  voiceStartSec?: number;
+  voiceDurationSec?: number;
+  voiceTrimStartSec?: number;
+  voiceEnabled?: boolean;
   higgsfield: HiggsfieldJobState;
   veo?: HiggsfieldJobState;
   activeVideoProvider?: 'higgsfield' | 'gemini_veo';
@@ -377,6 +384,14 @@ export interface ConnectConnectorResponse {
   error?: string;
 }
 
+export interface WizardMusicPreset {
+  title: string;
+  mood: string;
+  bpm: number;
+  volumeDb: number;
+  accentColor?: string;
+}
+
 export interface GenerateProjectRequest {
   topic: string;
   durationMinutes: number;
@@ -387,6 +402,34 @@ export interface GenerateProjectRequest {
   assetIds?: string[];
   sourceIds?: string[];
   autoGenerateVisuals?: boolean;
+  cinematicStyle?: CinematicStyle;
+  animationPreset?: SceneAnimationPreset;
+  diagramType?: NativeVisualDiagramType;
+  musicPreset?: WizardMusicPreset;
+}
+
+export type TimelineTrackKind = 'scene' | 'character' | 'voiceover' | 'music';
+
+export type TimelineDragPayload =
+  | { kind: 'asset'; assetId: string; name: string; sourceType?: 'photos' | 'video'; mediaUrl?: string }
+  | { kind: 'source'; sourceId: string; name: string; sourceType?: ImportedSourceType }
+  | { kind: 'source-slide'; sourceId: string; slideIndex: number; title: string }
+  | { kind: 'character'; characterId: string; name: string; voiceId?: string }
+  | { kind: 'voice'; voiceId: string; name: string; sampleUrl?: string; playbackMode?: VoicePlaybackMode }
+  | {
+      kind: 'music-preset';
+      title: string;
+      mood: string;
+      bpm: number;
+      volumeDb: number;
+      accentColor?: string;
+    };
+
+export interface TimelineDropRequest {
+  track: TimelineTrackKind;
+  dropSec: number;
+  targetSceneId?: string;
+  payload: TimelineDragPayload;
 }
 
 export interface GenerateVisualRequest {
