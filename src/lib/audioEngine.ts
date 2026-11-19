@@ -1,29 +1,45 @@
-// Lightweight studio audio preview & Web Audio ambient bed synthesizer
+// Lightweight studio audio preview, timeline voiceover playback & Web Audio ambient bed synthesizer
 
 let activeAudioEl: HTMLAudioElement | null = null;
 let audioCtx: AudioContext | null = null;
 let ambientStopFn: (() => void) | null = null;
 
-export function stopAllAudio() {
+export function stopVoiceAudio() {
   if (activeAudioEl) {
     activeAudioEl.pause();
     activeAudioEl.src = '';
     activeAudioEl = null;
   }
+}
+
+export function stopAllAudio() {
+  stopVoiceAudio();
   if (ambientStopFn) {
     ambientStopFn();
     ambientStopFn = null;
   }
 }
 
-export async function playVoiceBlobUrl(url: string, volume = 0.85): Promise<void> {
-  if (activeAudioEl) {
-    activeAudioEl.pause();
-    activeAudioEl = null;
-  }
+export async function playVoiceBlobUrl(
+  url: string,
+  volume = 0.85,
+  startOffsetSec = 0
+): Promise<void> {
+  stopVoiceAudio();
   const audio = new Audio(url);
   audio.volume = Math.max(0, Math.min(1, volume));
   activeAudioEl = audio;
+  if (startOffsetSec > 0.25) {
+    audio.addEventListener(
+      'loadedmetadata',
+      () => {
+        if (Number.isFinite(audio.duration) && startOffsetSec < audio.duration - 0.15) {
+          audio.currentTime = startOffsetSec;
+        }
+      },
+      { once: true }
+    );
+  }
   await audio.play().catch(() => {
     // Ignore autoplay blocks when user hasn't interacted yet
   });
@@ -36,7 +52,8 @@ export function startAmbientBed(bpm: number, volumeDb: number): () => void {
   }
 
   const AudioContextCtor =
-    window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextCtor) return () => undefined;
 
   try {

@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import cors from 'cors';
 import express from 'express';
 import { createApiRouter } from './routes/api.js';
+import { CredentialVault } from './store/credentialVault.js';
 import { ProjectStore } from './store/projectStore.js';
 
 export interface CreateAppOptions {
@@ -13,11 +14,12 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}) {
   const app = express();
   const store = new ProjectStore(options.dataDir);
+  const vault = new CredentialVault(options.dataDir);
 
   app.use(cors());
   app.use(express.json({ limit: '4mb' }));
 
-  app.use('/api', createApiRouter(store));
+  app.use('/api', createApiRouter(store, vault));
   app.use('/uploads', express.static(store.getUploadsDir()));
 
   const clientDistDir = path.resolve(process.cwd(), 'dist/client');
@@ -28,7 +30,7 @@ export function createApp(options: CreateAppOptions = {}) {
     });
   }
 
-  return { app, store };
+  return { app, store, vault };
 }
 
 function resolveRealPath(filePath: string): string {

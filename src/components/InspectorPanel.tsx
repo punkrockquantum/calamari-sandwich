@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import {
+  AlertCircle,
   Camera,
   Check,
+  CheckCircle2,
   Film,
   Loader2,
+  LogIn,
   Mic,
   Music,
   Play,
   Plus,
+  RefreshCw,
   Sparkles,
   Trash2,
   User,
@@ -19,6 +23,8 @@ import type {
   CharacterPlacement,
   CharacterProfile,
   CinematicStyle,
+  ConnectorDescriptor,
+  ConnectorId,
   ExplainerProject,
   MusicTrack,
   SceneItem,
@@ -33,11 +39,15 @@ interface InspectorPanelProps {
   project: ExplainerProject;
   activeScene: SceneItem | undefined;
   voices: VoiceProfile[];
-  voiceSource: 'env' | 'session' | 'mock';
+  voiceSource: 'env' | 'vault' | 'session' | 'mock';
+  connectors: ConnectorDescriptor[];
   allCharacters: CharacterProfile[];
   onUpdateScene: (sceneId: string, patch: Partial<SceneItem>) => Promise<void>;
   onTriggerHiggsfield: (sceneId: string) => Promise<void>;
   onPreviewVoice: (voiceId: string, sampleText?: string, sceneId?: string) => Promise<void>;
+  onSyncElevenLabsVoices: () => Promise<void>;
+  onAssignVoiceToAllScenes: (voiceId: string) => Promise<void>;
+  onOpenConnectModal: (id: ConnectorId) => void;
   onOpenCharacterClone: () => void;
   onAddMusicTrack: (track: Omit<MusicTrack, 'id'>) => Promise<void>;
   onDeleteMusicTrack: (trackId: string) => Promise<void>;
@@ -90,10 +100,14 @@ export function InspectorPanel({
   activeScene,
   voices,
   voiceSource,
+  connectors,
   allCharacters,
   onUpdateScene,
   onTriggerHiggsfield,
   onPreviewVoice,
+  onSyncElevenLabsVoices,
+  onAssignVoiceToAllScenes,
+  onOpenConnectModal,
   onOpenCharacterClone,
   onAddMusicTrack,
   onDeleteMusicTrack,
@@ -104,6 +118,11 @@ export function InspectorPanel({
   const [musicMood, setMusicMood] = useState('Ambient Tech');
   const [musicBpm, setMusicBpm] = useState(110);
   const [musicDb, setMusicDb] = useState(-15);
+
+  const elevenLabsConnector = connectors.find((c) => c.id === 'elevenlabs');
+  const higgsfieldConnector = connectors.find((c) => c.id === 'higgsfield');
+  const isElevenLabsConnected = elevenLabsConnector?.status === 'connected';
+  const isHiggsfieldConnected = higgsfieldConnector?.status === 'connected';
 
   const combinedCharacters = [
     ...project.characters,
@@ -125,6 +144,9 @@ export function InspectorPanel({
       accentColor: '#10b981',
     });
   };
+
+  const hfStatus = activeScene?.higgsfield.status;
+  const isHiggsfieldPolling = hfStatus === 'queued' || hfStatus === 'generating' || hfStatus === 'rendering';
 
   return (
     <aside className="w-full lg:w-[360px] xl:w-[390px] shrink-0 bg-[#0d0d14] border border-zinc-800/90 rounded-xl flex flex-col overflow-hidden">
@@ -171,6 +193,45 @@ export function InspectorPanel({
                 {activeScene.durationSec}s
               </span>
             </div>
+
+            {/* Higgsfield Connection Quick Action */}
+            {!isHiggsfieldConnected ? (
+              <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/20 p-2.5 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold text-cyan-200">
+                    Higgsfield in Demo Canvas Mode
+                  </div>
+                  <div className="text-[10px] text-cyan-300/75 truncate">
+                    Sign in to generate real AI video clips per scene
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenConnectModal('higgsfield')}
+                  className="inline-flex items-center gap-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-white shrink-0 transition"
+                >
+                  <LogIn className="w-3 h-3" />
+                  Connect Higgsfield
+                </button>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 px-3 py-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[11px] text-emerald-200 min-w-0">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">
+                    Higgsfield Connected{' '}
+                    {higgsfieldConnector?.maskedKey ? `(${higgsfieldConnector.maskedKey})` : ''}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenConnectModal('higgsfield')}
+                  className="text-[10px] text-emerald-300 hover:underline shrink-0"
+                >
+                  Account
+                </button>
+              </div>
+            )}
 
             <div className="space-y-2">
               <label className="block text-[11px] font-medium text-zinc-400">
@@ -320,16 +381,18 @@ export function InspectorPanel({
             <div className="pt-1 flex flex-col gap-2">
               <button
                 type="button"
-                disabled={busyAction === 'higgsfield'}
+                disabled={busyAction === 'higgsfield' || isHiggsfieldPolling}
                 onClick={() => void onTriggerHiggsfield(activeScene.id)}
-                className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 py-2 text-xs font-medium text-cyan-200 transition"
+                className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 py-2 text-xs font-medium text-cyan-200 transition disabled:opacity-60"
               >
-                {busyAction === 'higgsfield' ? (
+                {busyAction === 'higgsfield' || isHiggsfieldPolling ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : (
                   <Camera className="w-3.5 h-3.5" />
                 )}
-                Render Scene with Higgsfield
+                {isHiggsfieldPolling
+                  ? `Higgsfield Job: ${hfStatus}...`
+                  : 'Generate Cinematic Scene with Higgsfield'}
               </button>
 
               <button
@@ -348,11 +411,33 @@ export function InspectorPanel({
                 Synthesize & Preview Voiceover
               </button>
 
-              {activeScene.higgsfield.renderNote && (
-                <div className="rounded-lg bg-zinc-950 border border-zinc-800/80 p-2 text-[11px] text-zinc-400">
-                  {activeScene.higgsfield.renderNote}
+              {/* Higgsfield Job Status Box */}
+              <div
+                className={`rounded-lg border p-2.5 text-[11px] space-y-1 ${
+                  hfStatus === 'failed'
+                    ? 'border-rose-500/40 bg-rose-950/25 text-rose-200'
+                    : hfStatus === 'ready'
+                      ? 'border-emerald-500/35 bg-emerald-950/20 text-emerald-200'
+                      : 'border-zinc-800/80 bg-zinc-950 text-zinc-400'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold uppercase tracking-wider text-[10px] flex items-center gap-1">
+                    {hfStatus === 'failed' && <AlertCircle className="w-3 h-3 text-rose-400" />}
+                    {hfStatus === 'ready' && <CheckCircle2 className="w-3 h-3 text-emerald-400" />}
+                    {isHiggsfieldPolling && <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />}
+                    Status: {activeScene.higgsfield.status}
+                  </span>
+                  {activeScene.higgsfield.jobId && (
+                    <span className="font-mono text-[10px] opacity-75">
+                      {activeScene.higgsfield.jobId}
+                    </span>
+                  )}
                 </div>
-              )}
+                {activeScene.higgsfield.renderNote && (
+                  <div className="leading-relaxed">{activeScene.higgsfield.renderNote}</div>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -453,7 +538,7 @@ export function InspectorPanel({
 
         {tab === 'voices' && (
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
                   ElevenLabs Voice Library
@@ -470,6 +555,79 @@ export function InspectorPanel({
               <Sparkles className="w-4 h-4 text-amber-400" />
             </div>
 
+            {!isElevenLabsConnected ? (
+              <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-3 space-y-2">
+                <div className="text-xs font-semibold text-amber-200">
+                  Use your real ElevenLabs voices
+                </div>
+                <p className="text-[11px] text-amber-200/75 leading-relaxed">
+                  Sign in with your ElevenLabs API key to import your custom &amp; library voices
+                  and play real AI voiceovers on the timeline.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onOpenConnectModal('elevenlabs')}
+                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold py-1.5 text-xs transition"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  Connect ElevenLabs
+                </button>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-[11px] text-emerald-200 min-w-0">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate font-medium">
+                      {elevenLabsConnector?.account?.label || 'ElevenLabs Connected'}
+                      {elevenLabsConnector?.account?.tier
+                        ? ` (${elevenLabsConnector.account.tier})`
+                        : ''}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenConnectModal('elevenlabs')}
+                    className="text-[10px] text-emerald-300 hover:underline shrink-0"
+                  >
+                    Account
+                  </button>
+                </div>
+
+                {typeof elevenLabsConnector?.account?.remainingCharacters === 'number' &&
+                  typeof elevenLabsConnector?.account?.characterLimit === 'number' && (
+                    <div className="text-[10px] font-mono text-emerald-300/85">
+                      {elevenLabsConnector.account.remainingCharacters.toLocaleString()} /{' '}
+                      {elevenLabsConnector.account.characterLimit.toLocaleString()} chars remaining
+                    </div>
+                  )}
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={busyAction === 'sync-voices'}
+                    onClick={() => void onSyncElevenLabsVoices()}
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 py-1 text-[11px] font-medium text-amber-200 transition"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${busyAction === 'sync-voices' ? 'animate-spin' : ''}`}
+                    />
+                    Sync ElevenLabs Voices
+                  </button>
+                  {activeScene && (
+                    <button
+                      type="button"
+                      onClick={() => void onAssignVoiceToAllScenes(activeScene.voiceId)}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 transition"
+                      title="Apply active voice to all scenes"
+                    >
+                      Apply All
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-2">
               {voices.map((v) => {
                 const isSelected = activeScene?.voiceId === v.voice_id;
@@ -484,8 +642,19 @@ export function InspectorPanel({
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="text-xs font-semibold text-zinc-100 truncate">
-                          {v.name}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-semibold text-zinc-100 truncate">
+                            {v.name}
+                          </span>
+                          <span
+                            className={`text-[9px] rounded px-1 py-0.2 border shrink-0 ${
+                              v.source === 'elevenlabs'
+                                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                                : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+                            }`}
+                          >
+                            {v.source === 'elevenlabs' ? 'ElevenLabs' : 'Demo'}
+                          </span>
                         </div>
                         <div className="text-[10px] text-zinc-400 truncate">
                           {Object.values(v.labels).slice(0, 3).join(' • ') || v.category}

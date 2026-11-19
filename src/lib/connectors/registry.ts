@@ -1,4 +1,6 @@
 import type {
+  ConnectConnectorRequest,
+  ConnectConnectorResponse,
   ConnectorDescriptor,
   ConnectorId,
   ConnectorTestResult,
@@ -143,4 +145,45 @@ export async function testConnector(
     throw new Error(err.error || `Connector test failed (${res.status})`);
   }
   return res.json() as Promise<ConnectorTestResult>;
+}
+
+export async function connectConnectorAccount(
+  id: ConnectorId,
+  payload: ConnectConnectorRequest,
+  keys?: Partial<SessionConnectorKeys>,
+  demoPrefs?: Partial<DemoFallbackPrefs>
+): Promise<ConnectConnectorResponse> {
+  const res = await fetch(`/api/connectors/${encodeURIComponent(id)}/connect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildConnectorHeaders(keys, demoPrefs),
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await res.json().catch(() => ({
+    ok: false,
+    error: `HTTP ${res.status}`,
+  }))) as ConnectConnectorResponse;
+  if (!res.ok && !data.result) {
+    throw new Error(data.error || `Failed to connect (${res.status})`);
+  }
+  return data;
+}
+
+export async function disconnectConnectorAccount(
+  id: ConnectorId,
+  keys?: Partial<SessionConnectorKeys>,
+  demoPrefs?: Partial<DemoFallbackPrefs>
+): Promise<ConnectorDescriptor> {
+  const res = await fetch(`/api/connectors/${encodeURIComponent(id)}/disconnect`, {
+    method: 'POST',
+    headers: buildConnectorHeaders(keys, demoPrefs),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `Failed to disconnect (${res.status})`);
+  }
+  const data = (await res.json()) as { ok: boolean; connector: ConnectorDescriptor };
+  return data.connector;
 }

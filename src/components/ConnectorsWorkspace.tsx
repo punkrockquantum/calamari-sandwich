@@ -3,9 +3,12 @@ import {
   Activity,
   CheckCircle2,
   Cpu,
+  ExternalLink,
   Film,
   KeyRound,
   Loader2,
+  LogIn,
+  LogOut,
   Mic,
   Music,
   PlugZap,
@@ -37,6 +40,8 @@ interface ConnectorsWorkspaceProps {
   onTestConnector: (id: ConnectorId) => Promise<void>;
   onTestAllConnectors: () => Promise<void>;
   onClearAllSessionKeys: () => void;
+  onOpenConnectModal: (id: ConnectorId) => void;
+  onDisconnectConnector: (id: ConnectorId) => Promise<void>;
   onBackToStudio: () => void;
 }
 
@@ -73,6 +78,19 @@ function StatusBadge({ status }: { status: ConnectorStatusLevel }) {
   );
 }
 
+function formatKeySource(source: ConnectorDescriptor['keySource']): string {
+  switch (source) {
+    case 'vault':
+      return 'Local Vault';
+    case 'session':
+      return 'Session Header';
+    case 'env':
+      return 'Server Env';
+    default:
+      return 'none';
+  }
+}
+
 export function ConnectorsWorkspace({
   connectors,
   sessionKeys,
@@ -84,6 +102,8 @@ export function ConnectorsWorkspace({
   onTestConnector,
   onTestAllConnectors,
   onClearAllSessionKeys,
+  onOpenConnectModal,
+  onDisconnectConnector,
   onBackToStudio,
 }: ConnectorsWorkspaceProps) {
   const [draftKeys, setDraftKeys] = useState<SessionConnectorKeys>(sessionKeys);
@@ -97,7 +117,7 @@ export function ConnectorsWorkspace({
         {/* Header */}
         <div className="rounded-2xl border border-zinc-800/90 bg-[#0d0d14] p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center">
                 <PlugZap className="w-4 h-4 text-indigo-400" />
               </div>
@@ -109,13 +129,13 @@ export function ConnectorsWorkspace({
               </span>
             </div>
             <p className="text-xs text-zinc-400 max-w-2xl">
-              Plug in provider keys to run each stage of the Calamari Sandwich pipeline. Server
-              environment variables stay strictly backend-only; optional session keys entered here
-              stay in browser session memory and are never saved to bundles or project files.
+              Connect your ElevenLabs and Higgsfield accounts with one click, or configure
+              provider keys for each pipeline stage. Verified credentials persist across page
+              refreshes in the gitignored server vault (<code className="text-zinc-300">data/credentials.json</code>).
             </p>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <button
               type="button"
               onClick={() => {
@@ -159,9 +179,8 @@ export function ConnectorsWorkspace({
         <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 px-4 py-2.5 flex items-center gap-2.5 text-xs text-emerald-200/90">
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>
-            Zero-leak architecture: keys are passed per-request over custom headers or read from{' '}
-            <code className="text-emerald-300">process.env</code> on the Express backend. Demo Mode
-            keeps every creative tool working out of the box before API keys are added.
+            Zero-leak architecture: raw credentials are never returned in any API response. Server
+            priority is <code className="text-emerald-300">Session Header &gt; Local Vault &gt; process.env</code>, and Demo Mode keeps all studio tools usable offline.
           </span>
         </div>
 
@@ -172,6 +191,8 @@ export function ConnectorsWorkspace({
             const testResult = testResults[connector.id];
             const isTesting = testingId === connector.id || testingId === 'all';
             const demoEnabled = demoPrefs[connector.id] ?? true;
+            const isConnected = connector.status === 'connected';
+            const account = connector.account;
 
             return (
               <div
@@ -208,6 +229,98 @@ export function ConnectorsWorkspace({
                   ))}
                 </div>
 
+                {/* Signed-in Account Status / Guided Connect CTA */}
+                <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/85 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {isConnected ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      ) : (
+                        <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      )}
+                      <span className="text-xs font-medium text-zinc-200 truncate">
+                        {isConnected
+                          ? account?.label || `Connected (${formatKeySource(connector.keySource)})`
+                          : 'Account Not Connected'}
+                      </span>
+                      {connector.maskedKey && (
+                        <span className="font-mono text-[10px] rounded bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 text-zinc-300">
+                          {connector.maskedKey}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {connector.portalUrl && (
+                        <a
+                          href={connector.portalUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 hover:border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 transition"
+                          title={connector.portalLabel || 'Open Provider Portal'}
+                        >
+                          Portal
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onOpenConnectModal(connector.id)}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+                          isConnected
+                            ? 'border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200'
+                            : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                        }`}
+                      >
+                        <LogIn className="w-3 h-3" />
+                        {isConnected ? 'Account' : 'Connect / Sign In'}
+                      </button>
+                      {connector.savedInVault && (
+                        <button
+                          type="button"
+                          onClick={() => void onDisconnectConnector(connector.id)}
+                          title="Sign Out / Disconnect"
+                          className="inline-flex items-center gap-1 rounded-lg border border-rose-500/35 bg-rose-950/30 hover:bg-rose-900/40 px-2 py-1 text-[11px] text-rose-200 transition"
+                        >
+                          <LogOut className="w-3 h-3" />
+                          Sign Out
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {isConnected && connector.id === 'elevenlabs' && account && (
+                    <div className="flex items-center justify-between text-[11px] text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800/80 px-2.5 py-1.5">
+                      <span>
+                        Tier:{' '}
+                        <strong className="text-amber-300 uppercase text-[10px]">
+                          {account.tier || 'Verified'}
+                        </strong>
+                      </span>
+                      <span className="font-mono text-[10px] text-emerald-300">
+                        {typeof account.remainingCharacters === 'number' &&
+                        typeof account.characterLimit === 'number'
+                          ? `${account.remainingCharacters.toLocaleString()} / ${account.characterLimit.toLocaleString()} chars left`
+                          : `${account.voiceCount ?? 0} voices synced`}
+                      </span>
+                    </div>
+                  )}
+
+                  {isConnected && connector.id === 'higgsfield' && (
+                    <div className="flex items-center justify-between text-[11px] text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800/80 px-2.5 py-1.5">
+                      <span>
+                        Model:{' '}
+                        <code className="text-cyan-300 text-[10px]">
+                          {account?.model || connector.model || 'higgsfield-dop-turbo'}
+                        </code>
+                      </span>
+                      <span className="text-[10px] text-emerald-300 font-mono">
+                        Fingerprint {connector.maskedKey || 'verified'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-2 rounded-xl border border-zinc-800/80 bg-zinc-950/70 p-3">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="text-zinc-400 flex items-center gap-1">
@@ -215,7 +328,7 @@ export function ConnectorsWorkspace({
                       Server Env: <code className="text-zinc-200">{connector.envVar}</code>
                     </span>
                     <span className="text-zinc-500 font-mono">
-                      Source: {connector.keySource}
+                      Source: {formatKeySource(connector.keySource)}
                     </span>
                   </div>
 

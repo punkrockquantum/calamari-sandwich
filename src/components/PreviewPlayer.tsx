@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   ChevronLeft,
   ChevronRight,
   Film,
+  Loader2,
   Pause,
   Play,
   Sparkles,
@@ -24,6 +25,7 @@ interface PreviewPlayerProps {
   isPlaying: boolean;
   isMuted: boolean;
   activeSceneId: string;
+  activeVoiceSource?: 'elevenlabs' | 'mock' | null;
   onTogglePlay: () => void;
   onToggleMute: () => void;
   onSeek: (sec: number) => void;
@@ -90,6 +92,7 @@ export function PreviewPlayer({
   isPlaying,
   isMuted,
   activeSceneId,
+  activeVoiceSource,
   onTogglePlay,
   onToggleMute,
   onSeek,
@@ -97,8 +100,10 @@ export function PreviewPlayer({
   onSpeakActiveScene,
 }: PreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const animTimeRef = useRef<number>(0);
+  const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
 
   const sceneOffsets = useMemo(() => {
     let acc = 0;
@@ -125,6 +130,42 @@ export function PreviewPlayer({
   const activeCharacter: CharacterProfile | undefined = project.characters.find(
     (c) => c.id === activeScene?.characterId
   );
+
+  const higgsfieldVideoUrl =
+    activeScene?.higgsfield.provider === 'higgsfield' &&
+    activeScene.higgsfield.status === 'ready' &&
+    activeScene.higgsfield.videoUrl &&
+    activeScene.higgsfield.videoUrl !== failedVideoUrl
+      ? activeScene.higgsfield.videoUrl
+      : null;
+
+  // Sync Higgsfield <video> element with timeline playback & seek
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !higgsfieldVideoUrl || !activeEntry) return;
+
+    video.muted = isMuted;
+    const localTime = Math.max(0, currentTimeSec - activeEntry.startSec);
+    if (
+      Number.isFinite(video.duration) &&
+      video.duration > 0 &&
+      Math.abs(video.currentTime - (localTime % video.duration)) > 0.8
+    ) {
+      try {
+        video.currentTime = localTime % video.duration;
+      } catch {
+        // Ignore seek errors before metadata loads
+      }
+    }
+
+    if (isPlaying) {
+      void video.play().catch(() => {
+        // Ignore browser autoplay restrictions
+      });
+    } else {
+      video.pause();
+    }
+  }, [higgsfieldVideoUrl, isPlaying, isMuted, activeEntry, currentTimeSec]);
 
   // Preload uploaded character images for canvas rendering
   useEffect(() => {
@@ -503,16 +544,37 @@ export function PreviewPlayer({
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {activeVoiceSource && (
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                activeVoiceSource === 'elevenlabs'
+                  ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+              }`}
+            >
+              {activeVoiceSource === 'elevenlabs' ? 'ElevenLabs VO' : 'Demo VO'}
+            </span>
+          )}
           <span
-            className={`text-[10px] px-2 py-0.5 rounded-full border ${
-              activeScene?.higgsfield.provider === 'higgsfield'
+            className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border ${
+              higgsfieldVideoUrl
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+                : activeScene?.higgsfield.status === 'queued' ||
+                    activeScene?.higgsfield.status === 'generating'
+                  ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                  : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
             }`}
           >
-            {activeScene?.higgsfield.provider === 'higgsfield'
-              ? 'Higgsfield Render'
-              : 'Canvas Stage Fallback'}
+            {(activeScene?.higgsfield.status === 'queued' ||
+              activeScene?.higgsfield.status === 'generating') && (
+              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+            )}
+            {higgsfieldVideoUrl
+              ? 'Higgsfield Video'
+              : activeScene?.higgsfield.status === 'queued' ||
+                  activeScene?.higgsfield.status === 'generating'
+                ? `Higgsfield ${activeScene.higgsfield.status}...`
+                : 'Canvas Stage Fallback'}
           </span>
           <button
             type="button"
@@ -525,15 +587,37 @@ export function PreviewPlayer({
         </div>
       </div>
 
-      {/* 16:9 Canvas Stage */}
+      {/* 16:9 Stage: Higgsfield Generated Video (when ready) or 60fps Canvas Fallback */}
       <div className="relative bg-[#06060a] py-2 px-3 flex items-center justify-center">
-        <div className="w-full max-w-[540px] aspect-video rounded-lg overflow-hidden border border-zinc-800/70 shadow-lg bg-black">
+        <div className="relative w-full max-w-[540px] aspect-video rounded-lg overflow-hidden border border-zinc-800/70 shadow-lg bg-black">
           <canvas
             ref={canvasRef}
             width={960}
             height={540}
-            className="w-full h-full block"
+            className={`w-full h-full block ${higgsfieldVideoUrl ? 'hidden' : ''}`}
           />
+          {higgsfieldVideoUrl && (
+            <>
+              <video
+                ref={videoRef}
+                key={higgsfieldVideoUrl}
+                src={higgsfieldVideoUrl}
+                playsInline
+                loop
+                muted={isMuted}
+                onError={() => setFailedVideoUrl(higgsfieldVideoUrl)}
+                className="w-full h-full object-cover block"
+              />
+              <div className="pointer-events-none absolute top-2.5 left-2.5 rounded-md bg-black/70 border border-white/10 px-2 py-1 text-[10px] font-medium text-cyan-300">
+                {activeChapter?.title || 'Chapter'} • {activeScene?.cameraMotion}
+              </div>
+              {activeScene?.narration && (
+                <div className="pointer-events-none absolute bottom-2.5 left-4 right-4 rounded-lg bg-black/75 border border-white/10 px-3 py-1.5 text-center text-[11px] text-zinc-100 line-clamp-2">
+                  {activeScene.narration}
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
 

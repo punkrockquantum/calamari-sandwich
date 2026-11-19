@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type {
   CharacterProfile,
+  ConnectConnectorRequest,
   ConnectorDescriptor,
   ConnectorId,
   ConnectorTestResult,
@@ -14,7 +15,9 @@ import type {
 import { studioApi } from '@/lib/api';
 import {
   CONNECTOR_IDS,
+  connectConnectorAccount,
   createEmptySessionConnectorKeys,
+  disconnectConnectorAccount,
   fetchConnectors,
   loadDemoFallbackPrefs,
   loadSessionConnectorKeys,
@@ -24,7 +27,12 @@ import {
   type DemoFallbackPrefs,
   type SessionConnectorKeys,
 } from '@/lib/connectors/registry';
-import { playVoiceBlobUrl, startAmbientBed, stopAllAudio } from '@/lib/audioEngine';
+import {
+  playVoiceBlobUrl,
+  startAmbientBed,
+  stopAllAudio,
+  stopVoiceAudio,
+} from '@/lib/audioEngine';
 import { CharacterCloningModal } from '@/components/CharacterCloningModal';
 import { ConnectorsWorkspace } from '@/components/ConnectorsWorkspace';
 import { DirectorPromptBar } from '@/components/DirectorPromptBar';
@@ -32,6 +40,7 @@ import { InspectorPanel } from '@/components/InspectorPanel';
 import { IterationHistoryDrawer } from '@/components/IterationHistoryDrawer';
 import { MultiTrackTimeline } from '@/components/MultiTrackTimeline';
 import { PreviewPlayer } from '@/components/PreviewPlayer';
+import { ProviderConnectModal } from '@/components/ProviderConnectModal';
 import { TopBar, type WorkspaceView } from '@/components/TopBar';
 import { TopicGeneratorModal } from '@/components/TopicGeneratorModal';
 
@@ -42,7 +51,7 @@ export function App() {
   const [activeView, setActiveView] = useState<WorkspaceView>('studio');
 
   const [voices, setVoices] = useState<VoiceProfile[]>([]);
-  const [voiceSource, setVoiceSource] = useState<'env' | 'session' | 'mock'>('mock');
+  const [voiceSource, setVoiceSource] = useState<'env' | 'vault' | 'session' | 'mock'>('mock');
   const [allCharacters, setAllCharacters] = useState<CharacterProfile[]>([]);
   const [presets, setPresets] = useState<CharacterProfile[]>([]);
 
@@ -61,16 +70,22 @@ export function App() {
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [activeVoiceSource, setActiveVoiceSource] = useState<'elevenlabs' | 'mock' | null>(null);
 
   const [showNewModal, setShowNewModal] = useState(false);
   const [showCloneModal, setShowCloneModal] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
+  const [connectModalId, setConnectModalId] = useState<ConnectorId | null>(null);
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [lastActionSummary, setLastActionSummary] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const ambientStopRef = useRef<(() => void) | null>(null);
+  const voiceCacheRef = useRef<
+    Map<string, { blobUrl: string; source: 'elevenlabs' | 'mock' }>
+  >(new Map());
+  const lastSpokenSceneKeyRef = useRef<string | null>(null);
 
   const refreshConnectorsAndVoices = useCallback(
     async (keys: SessionConnectorKeys, prefs: DemoFallbackPrefs) => {
@@ -81,6 +96,7 @@ export function App() {
       setConnectors(connectorList);
       setVoices(voiceRes.voices);
       setVoiceSource(voiceRes.source);
+      return { connectorList, voiceRes };
     },
     []
   );
@@ -195,6 +211,117 @@ export function App() {
       cursor += sc.durationSec;
     }
   }, [currentTimeSec, activeProject, isPlaying, activeSceneId]);
+
+  // Real ElevenLabs / fallback voiceover playback synchronized with timeline playback
+  useEffect(() => {
+    if (!isPlaying || isMuted || !activeProject || !activeScene) {
+      stopVoiceAudio();
+      lastSpokenSceneKeyRef.current = null;
+      if (!isPlaying || isMuted) {
+        setActiveVoiceSource(null);
+      }
+      return;
+    }
+
+    const spokenKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}`;
+    if (lastSpokenSceneKeyRef.current === spokenKey) {
+      return;
+    }
+    lastSpokenSceneKeyRef.current = spokenKey;
+
+    let sceneStartSec = 0;
+    for (const sc of activeProject.scenes) {
+      if (sc.id === activeScene.id) break;
+      sceneStartSec += sc.durationSec;
+    }
+    const localOffsetSec = Math.max(0, currentTimeSec - sceneStartSec);
+    let cancelled = false;
+
+    const cached = voiceCacheRef.current.get(spokenKey);
+    if (cached) {
+      setActiveVoiceSource(cached.source);
+      void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      try {
+        const res = await studioApi.synthesizeSpeech(
+          {
+            voiceId: activeScene.voiceId,
+            text: activeScene.narration,
+            projectId: activeProject.id,
+            sceneId: activeScene.id,
+          },
+          sessionKeys
+        );
+        if (cancelled) return;
+        const normalizedSource = res.source === 'elevenlabs' ? 'elevenlabs' : 'mock';
+        voiceCacheRef.current.set(spokenKey, {
+          blobUrl: res.blobUrl,
+          source: normalizedSource,
+        });
+        setActiveVoiceSource(normalizedSource);
+        await playVoiceBlobUrl(res.blobUrl, 0.9, localOffsetSec);
+      } catch {
+        if (!cancelled) {
+          setActiveVoiceSource(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isPlaying, isMuted, activeProject, activeScene, currentTimeSec, sessionKeys]);
+
+  // Poll queued / generating Higgsfield render jobs until ready or failed
+  const pendingHiggsfieldSceneIds = useMemo(() => {
+    if (!activeProject) return [];
+    return activeProject.scenes
+      .filter(
+        (sc) =>
+          sc.higgsfield.provider === 'higgsfield' &&
+          (sc.higgsfield.status === 'queued' ||
+            sc.higgsfield.status === 'generating' ||
+            sc.higgsfield.status === 'rendering')
+      )
+      .map((sc) => sc.id);
+  }, [activeProject]);
+
+  useEffect(() => {
+    if (!activeProject || pendingHiggsfieldSceneIds.length === 0) return;
+    let cancelled = false;
+    const projectId = activeProject.id;
+
+    const timer = window.setInterval(() => {
+      void (async () => {
+        for (const scId of pendingHiggsfieldSceneIds) {
+          if (cancelled) return;
+          try {
+            const res = await studioApi.pollHiggsfieldJob(projectId, scId, sessionKeys);
+            if (!cancelled) {
+              upsertProject(res.project);
+              if (res.higgsfield.status === 'ready') {
+                setLastActionSummary(`Higgsfield video ready for scene`);
+              } else if (res.higgsfield.status === 'failed') {
+                setErrorBanner(res.higgsfield.errorMessage || 'Higgsfield generation failed.');
+              }
+            }
+          } catch {
+            // Keep polling until next tick
+          }
+        }
+      })();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeProject, pendingHiggsfieldSceneIds, sessionKeys]);
 
   const handleGenerateProject = async (payload: GenerateProjectRequest) => {
     setBusyAction('generate');
@@ -387,10 +514,93 @@ export function App() {
       const result = await testConnector(id, sessionKeys, demoPrefs);
       setTestResults((prev) => ({ ...prev, [id]: result }));
       await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      return result;
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Connector test failed.');
+      return undefined;
     } finally {
       setTestingId(null);
+    }
+  };
+
+  const handleConnectConnector = async (
+    id: ConnectorId,
+    payload: ConnectConnectorRequest
+  ) => {
+    const res = await connectConnectorAccount(id, payload, sessionKeys, demoPrefs);
+    if (res.result) {
+      setTestResults((prev) => ({ ...prev, [id]: res.result }));
+    }
+    if (res.ok) {
+      // Clear temporary session key override so the persisted local vault takes precedence
+      const nextKeys = { ...sessionKeys, [id]: '' };
+      saveSessionConnectorKeys(nextKeys);
+      setSessionKeys(nextKeys);
+
+      const { voiceRes } = await refreshConnectorsAndVoices(nextKeys, demoPrefs);
+      if (id === 'elevenlabs' && voiceRes.source !== 'mock' && voiceRes.voices.length > 0 && activeProject) {
+        const firstRealVoice = voiceRes.voices.find((v) => v.source === 'elevenlabs');
+        if (firstRealVoice && activeScene?.voiceId.startsWith('mock-')) {
+          const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
+            voiceId: firstRealVoice.voice_id,
+          });
+          upsertProject(updated.project);
+        }
+        voiceCacheRef.current.clear();
+      }
+      setLastActionSummary(res.result.message);
+    }
+    return { ok: res.ok, error: res.error, result: res.result };
+  };
+
+  const handleDisconnectConnector = async (id: ConnectorId) => {
+    await disconnectConnectorAccount(id, sessionKeys, demoPrefs);
+    const nextKeys = { ...sessionKeys, [id]: '' };
+    saveSessionConnectorKeys(nextKeys);
+    setSessionKeys(nextKeys);
+    setTestResults((prev) => {
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
+    if (id === 'elevenlabs') {
+      voiceCacheRef.current.clear();
+    }
+    await refreshConnectorsAndVoices(nextKeys, demoPrefs);
+    setLastActionSummary(`Disconnected ${id}`);
+  };
+
+  const handleSyncElevenLabsVoices = async () => {
+    setBusyAction('sync-voices');
+    try {
+      voiceCacheRef.current.clear();
+      const { voiceRes } = await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      setLastActionSummary(
+        voiceRes.source === 'mock'
+          ? 'Using studio demo voices (connect ElevenLabs for library voices)'
+          : `Synced ${voiceRes.voices.length} ElevenLabs voices`
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleAssignVoiceToAllScenes = async (voiceId: string) => {
+    if (!activeProject) return;
+    setBusyAction('assign-voices');
+    try {
+      let latestProject = activeProject;
+      for (const sc of activeProject.scenes) {
+        if (sc.voiceId !== voiceId) {
+          const res = await studioApi.updateScene(activeProject.id, sc.id, { voiceId });
+          latestProject = res.project;
+        }
+      }
+      upsertProject(latestProject);
+      voiceCacheRef.current.clear();
+      setLastActionSummary('Applied selected voice to all scenes');
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -467,9 +677,13 @@ export function App() {
           testingId={testingId}
           onUpdateSessionKey={handleUpdateConnectorKey}
           onToggleDemoFallback={handleToggleDemoFallback}
-          onTestConnector={handleTestConnector}
+          onTestConnector={async (id) => {
+            await handleTestConnector(id);
+          }}
           onTestAllConnectors={handleTestAllConnectors}
           onClearAllSessionKeys={handleClearAllSessionKeys}
+          onOpenConnectModal={(id) => setConnectModalId(id)}
+          onDisconnectConnector={handleDisconnectConnector}
           onBackToStudio={() => setActiveView('studio')}
         />
       ) : (
@@ -483,9 +697,13 @@ export function App() {
                 isPlaying={isPlaying}
                 isMuted={isMuted}
                 activeSceneId={activeScene?.id || ''}
+                activeVoiceSource={activeVoiceSource}
                 onTogglePlay={() => setIsPlaying((p) => !p)}
                 onToggleMute={() => setIsMuted((m) => !m)}
-                onSeek={(sec) => setCurrentTimeSec(sec)}
+                onSeek={(sec) => {
+                  lastSpokenSceneKeyRef.current = null;
+                  setCurrentTimeSec(sec);
+                }}
                 onSelectScene={(id) => setActiveSceneId(id)}
                 onSpeakActiveScene={() => {
                   if (activeScene) {
@@ -511,10 +729,14 @@ export function App() {
               activeScene={activeScene}
               voices={voices}
               voiceSource={voiceSource}
+              connectors={connectors}
               allCharacters={allCharacters}
               onUpdateScene={handleUpdateScene}
               onTriggerHiggsfield={handleTriggerHiggsfield}
               onPreviewVoice={handlePreviewVoice}
+              onSyncElevenLabsVoices={handleSyncElevenLabsVoices}
+              onAssignVoiceToAllScenes={handleAssignVoiceToAllScenes}
+              onOpenConnectModal={(id) => setConnectModalId(id)}
               onOpenCharacterClone={() => setShowCloneModal(true)}
               onAddMusicTrack={handleAddMusicTrack}
               onDeleteMusicTrack={handleDeleteMusicTrack}
@@ -558,6 +780,16 @@ export function App() {
         history={activeProject.history}
         onClose={() => setShowHistoryDrawer(false)}
         onRestore={handleRestoreSnapshot}
+      />
+
+      <ProviderConnectModal
+        open={connectModalId !== null}
+        connector={connectors.find((c) => c.id === connectModalId) || null}
+        onClose={() => setConnectModalId(null)}
+        onConnect={handleConnectConnector}
+        onDisconnect={handleDisconnectConnector}
+        onTest={handleTestConnector}
+        onSyncVoices={handleSyncElevenLabsVoices}
       />
     </div>
   );
