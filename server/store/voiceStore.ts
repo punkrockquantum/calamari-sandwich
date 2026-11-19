@@ -166,6 +166,7 @@ export class VoiceStore {
     description?: string;
     sampleUrl?: string;
     sampleMimeType?: string;
+    playbackMode?: 'speak-script' | 'direct-sample';
     traits: VoiceTraits;
   }): Promise<VoiceProfile> {
     const voice: VoiceProfile = {
@@ -181,9 +182,10 @@ export class VoiceStore {
       },
       description:
         params.description?.trim() ||
-        `Native cloned voice (${params.traits.tone}, ${params.traits.pitch} pitch, ${params.traits.cadence} cadence).`,
+        `Native voice (${params.traits.tone}, ${params.traits.pitch} pitch, ${params.traits.cadence} cadence).`,
       sampleUrl: params.sampleUrl,
       sampleMimeType: params.sampleMimeType,
+      playbackMode: params.playbackMode || 'speak-script',
       traits: params.traits,
       pushStatus: 'local',
       createdAt: new Date().toISOString(),

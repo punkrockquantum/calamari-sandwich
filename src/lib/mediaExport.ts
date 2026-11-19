@@ -20,11 +20,20 @@ export function sanitizeFilename(name: string): string {
   );
 }
 
+export function extensionForAudioMime(contentType: string): string {
+  const lower = contentType.toLowerCase();
+  if (lower.includes('mpeg') || lower.includes('mp3')) return 'mp3';
+  if (lower.includes('webm')) return 'webm';
+  if (lower.includes('ogg') || lower.includes('opus')) return 'ogg';
+  if (lower.includes('mp4') || lower.includes('m4a') || lower.includes('aac')) return 'm4a';
+  return 'wav';
+}
+
 export async function exportCanvasWithAudioWebm(params: {
   canvas: HTMLCanvasElement;
   voiceBlob?: Blob;
   durationSec: number;
-}): Promise<Blob> {
+}): Promise<{ blob: Blob; hasAudioTrack: boolean }> {
   if (typeof MediaRecorder === 'undefined' || typeof params.canvas.captureStream !== 'function') {
     throw new Error('Video export via MediaRecorder is not supported in this browser.');
   }
@@ -34,9 +43,11 @@ export async function exportCanvasWithAudioWebm(params: {
 
   let audioCtx: AudioContext | null = null;
   let audioSource: AudioBufferSourceNode | null = null;
-  let renderDurationMs = Math.min(Math.max(2500, params.durationSec * 1000), 6000);
+  let hasAudioTrack = false;
+  // When no real audio blob is provided (browser SpeechSynthesis mode), export a crisp animated clip
+  let renderDurationMs = Math.min(Math.max(3000, params.durationSec * 1000), 8000);
 
-  if (params.voiceBlob) {
+  if (params.voiceBlob && params.voiceBlob.size > 0) {
     const AudioCtx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -53,28 +64,33 @@ export async function exportCanvasWithAudioWebm(params: {
         audioSource.buffer = decoded;
         audioSource.connect(dest);
         combinedTracks.push(...dest.stream.getAudioTracks());
-        renderDurationMs = Math.min(Math.max(2000, Math.ceil(decoded.duration * 1000) + 250), 8000);
+        hasAudioTrack = dest.stream.getAudioTracks().length > 0;
+        // Preserve full spoken audio up to 45s instead of truncating mid-sentence
+        renderDurationMs = Math.min(Math.max(2500, Math.ceil(decoded.duration * 1000) + 350), 45000);
       } catch {
-        // Fall back to video-only stream if audio decode fails
+        // Export video cleanly without synthesizing robotic fallback audio
+        hasAudioTrack = false;
       }
     }
   }
 
   const stream = new MediaStream(combinedTracks);
-  const mimeCandidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
+  const mimeCandidates = hasAudioTrack
+    ? [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',
+        'video/webm',
+      ]
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
   const selectedMime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m));
   const recorder = selectedMime
     ? new MediaRecorder(stream, { mimeType: selectedMime })
     : new MediaRecorder(stream);
 
   const chunks: Blob[] = [];
-  const resultPromise = new Promise<Blob>((resolve, reject) => {
+  const resultPromise = new Promise<{ blob: Blob; hasAudioTrack: boolean }>((resolve, reject) => {
     recorder.ondataavailable = (ev) => {
       if (ev.data && ev.data.size > 0) chunks.push(ev.data);
     };
@@ -94,7 +110,7 @@ export async function exportCanvasWithAudioWebm(params: {
       if (out.size === 0) {
         reject(new Error('Exported video buffer was empty.'));
       } else {
-        resolve(out);
+        resolve({ blob: out, hasAudioTrack });
       }
     };
   });

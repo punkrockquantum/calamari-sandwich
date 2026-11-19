@@ -13,6 +13,8 @@ import type {
   RagContextMatch,
   SceneItem,
   TechAsset,
+  TtsBrowserFallback,
+  VoicePlaybackMode,
   VoiceProfile,
 } from '@shared/types';
 import { studioApi } from '@/lib/api';
@@ -33,6 +35,7 @@ import {
 import {
   playAudioUrl,
   playVoiceBlobUrl,
+  speakWithBrowserSpeechSynthesis,
   startAmbientBed,
   stopAllAudio,
   stopVoiceAudio,
@@ -40,6 +43,7 @@ import {
 } from '@/lib/audioEngine';
 import {
   exportCanvasWithAudioWebm,
+  extensionForAudioMime,
   sanitizeFilename,
   triggerBlobDownload,
 } from '@/lib/mediaExport';
@@ -87,6 +91,9 @@ export function App() {
   const [activeVoiceSource, setActiveVoiceSource] = useState<
     'elevenlabs' | 'native' | 'mock' | null
   >(null);
+  const [activeVoiceMode, setActiveVoiceMode] = useState<
+    'elevenlabs' | 'direct-sample' | 'system-speech' | null
+  >(null);
 
   const [showNewModal, setShowNewModal] = useState(false);
   const [showCloneModal, setShowCloneModal] = useState(false);
@@ -107,19 +114,28 @@ export function App() {
   const voiceCacheRef = useRef<
     Map<
       string,
-      {
-        blobUrl: string;
-        blob: Blob;
-        contentType: string;
-        source: 'elevenlabs' | 'native' | 'mock';
-      }
+      | {
+          kind: 'audio';
+          blobUrl: string;
+          blob: Blob;
+          contentType: string;
+          source: 'elevenlabs' | 'native' | 'mock';
+          synthesisMode?: string;
+        }
+      | {
+          kind: 'speech-synthesis';
+          fallback: TtsBrowserFallback;
+          source: 'native' | 'mock';
+        }
     >
   >(new Map());
   const lastSpokenSceneKeyRef = useRef<string | null>(null);
 
   const clearVoiceCache = useCallback(() => {
     for (const entry of voiceCacheRef.current.values()) {
-      URL.revokeObjectURL(entry.blobUrl);
+      if (entry.kind === 'audio') {
+        URL.revokeObjectURL(entry.blobUrl);
+      }
     }
     voiceCacheRef.current.clear();
   }, []);
@@ -269,18 +285,20 @@ export function App() {
     }
   }, [currentTimeSec, activeProject, isPlaying, activeSceneId]);
 
-  // Synchronized ElevenLabs / Native Cloned / Demo voiceover playback during timeline playback
+  // Synchronized ElevenLabs / Native Cloned / System Speech voiceover playback during timeline playback
   useEffect(() => {
     if (!isPlaying || isMuted || !activeProject?.id || !activeScene) {
       stopVoiceAudio();
       lastSpokenSceneKeyRef.current = null;
       if (!isPlaying || isMuted) {
         setActiveVoiceSource(null);
+        setActiveVoiceMode(null);
       }
       return;
     }
 
-    const spokenKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}:${seekEpoch}`;
+    const playbackModeKey = activeScene.voicePlaybackMode || 'auto';
+    const spokenKey = `${activeScene.id}:${activeScene.voiceId}:${playbackModeKey}:${activeScene.narration}:${seekEpoch}`;
     if (lastSpokenSceneKeyRef.current === spokenKey) {
       return;
     }
@@ -293,13 +311,31 @@ export function App() {
       sceneStartSec += sc.durationSec;
     }
     const localOffsetSec = Math.max(0, currentTimeSecRef.current - sceneStartSec);
-    const cacheKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}`;
+    const cacheKey = `${activeScene.id}:${activeScene.voiceId}:${playbackModeKey}:${activeScene.narration}`;
+    const voiceObj = voices.find((v) => v.voice_id === activeScene.voiceId);
     let cancelled = false;
 
     const cached = voiceCacheRef.current.get(cacheKey);
     if (cached) {
       setActiveVoiceSource(cached.source);
-      void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec);
+      if (cached.kind === 'speech-synthesis') {
+        setActiveVoiceMode('system-speech');
+        void speakWithBrowserSpeechSynthesis({
+          text: activeScene.narration,
+          speechConfig: cached.fallback.speechConfig,
+          startOffsetSec: localOffsetSec,
+          sceneDurationSec: activeScene.durationSec,
+        });
+      } else {
+        setActiveVoiceMode(
+          cached.synthesisMode === 'direct-sample'
+            ? 'direct-sample'
+            : cached.source === 'elevenlabs'
+              ? 'elevenlabs'
+              : 'system-speech'
+        );
+        void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec, voiceObj?.traits);
+      }
       return () => {
         cancelled = true;
       };
@@ -313,11 +349,14 @@ export function App() {
             text: activeScene.narration,
             projectId: activeProject.id,
             sceneId: activeScene.id,
+            playbackMode: activeScene.voicePlaybackMode,
           },
           sessionKeysRef.current
         );
         if (cancelled) {
-          URL.revokeObjectURL(res.blobUrl);
+          if (res.kind === 'audio') {
+            URL.revokeObjectURL(res.blobUrl);
+          }
           return;
         }
         const normalizedSource =
@@ -326,20 +365,53 @@ export function App() {
             : res.source === 'native'
               ? 'native'
               : 'mock';
+
+        if (res.kind === 'speech-synthesis') {
+          voiceCacheRef.current.set(cacheKey, {
+            kind: 'speech-synthesis',
+            fallback: res.fallback,
+            source: normalizedSource === 'native' ? 'native' : 'mock',
+          });
+          setActiveVoiceSource(normalizedSource);
+          setActiveVoiceMode('system-speech');
+          await speakWithBrowserSpeechSynthesis({
+            text: activeScene.narration,
+            speechConfig: res.fallback.speechConfig,
+            startOffsetSec: localOffsetSec,
+            sceneDurationSec: activeScene.durationSec,
+          });
+          return;
+        }
+
         voiceCacheRef.current.set(cacheKey, {
+          kind: 'audio',
           blobUrl: res.blobUrl,
           blob: res.blob,
           contentType: res.contentType,
           source: normalizedSource,
+          synthesisMode: res.synthesisMode,
         });
         setActiveVoiceSource(normalizedSource);
-        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, localOffsetSec);
+        setActiveVoiceMode(
+          res.synthesisMode === 'direct-sample'
+            ? 'direct-sample'
+            : normalizedSource === 'elevenlabs'
+              ? 'elevenlabs'
+              : 'system-speech'
+        );
+        const playback = await playVoiceBlobUrl(
+          res.blobUrl,
+          0.9,
+          localOffsetSec,
+          voiceObj?.traits
+        );
         if (!playback.ok && playback.error && !cancelled) {
           setErrorBanner(`Audio playback blocked: ${playback.error}`);
         }
       } catch (err) {
         if (!cancelled) {
           setActiveVoiceSource(null);
+          setActiveVoiceMode(null);
           setErrorBanner(
             err instanceof Error ? err.message : 'Voiceover synthesis failed during playback.'
           );
@@ -356,8 +428,10 @@ export function App() {
     activeProject?.id,
     activeScene?.id,
     activeScene?.voiceId,
+    activeScene?.voicePlaybackMode,
     activeScene?.narration,
     seekEpoch,
+    voices,
   ]);
 
   // Poll queued / generating Higgsfield and Gemini Veo jobs until ready or failed
@@ -502,7 +576,12 @@ export function App() {
     try {
       const { project } = await studioApi.updateScene(activeProject.id, sceneId, patch);
       upsertProject(project);
-      if (patch.voiceId !== undefined || patch.narration !== undefined) {
+      if (
+        patch.voiceId !== undefined ||
+        patch.narration !== undefined ||
+        patch.voicePlaybackMode !== undefined
+      ) {
+        clearVoiceCache();
         lastSpokenSceneKeyRef.current = null;
       }
     } catch (err) {
@@ -569,12 +648,19 @@ export function App() {
     setBusyAction('tts');
     setErrorBanner(null);
     try {
+      const sceneObj = sceneId
+        ? activeProject.scenes.find((s) => s.id === sceneId)
+        : activeScene;
+      const voiceObj = voices.find((v) => v.voice_id === voiceId);
+      const textToSpeak =
+        sampleText || activeScene?.narration || 'Calamari Sandwich narration check.';
       const res = await studioApi.synthesizeSpeech(
         {
           voiceId,
-          text: sampleText || activeScene?.narration || 'Calamari Sandwich narration check.',
+          text: textToSpeak,
           projectId: activeProject.id,
           sceneId,
+          playbackMode: sceneId ? sceneObj?.voicePlaybackMode : undefined,
         },
         sessionKeys
       );
@@ -585,23 +671,69 @@ export function App() {
             ? 'native'
             : 'mock';
       setActiveVoiceSource(normalizedSource);
-      const playback = await playVoiceBlobUrl(res.blobUrl);
-      if (!playback.ok && playback.error) {
-        setErrorBanner(`Audio playback failed: ${playback.error}`);
+
+      if (res.kind === 'speech-synthesis') {
+        setActiveVoiceMode('system-speech');
+        const speechPlay = await speakWithBrowserSpeechSynthesis({
+          text: textToSpeak,
+          speechConfig: res.fallback.speechConfig,
+        });
+        if (!speechPlay.ok && speechPlay.error) {
+          setErrorBanner(`Speech preview failed: ${speechPlay.error}`);
+        }
+        setLastActionSummary(
+          `Speaking via browser SpeechSynthesis (${speechPlay.voiceUsed || res.fallback.voiceName})`
+        );
+      } else {
+        setActiveVoiceMode(
+          res.synthesisMode === 'direct-sample'
+            ? 'direct-sample'
+            : normalizedSource === 'elevenlabs'
+              ? 'elevenlabs'
+              : 'system-speech'
+        );
+        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, 0, voiceObj?.traits);
+        if (!playback.ok && playback.error) {
+          setErrorBanner(`Audio playback failed: ${playback.error}`);
+        }
+        setLastActionSummary(
+          res.synthesisMode === 'direct-sample'
+            ? 'Playing recorded/uploaded voice clip'
+            : normalizedSource === 'elevenlabs'
+              ? 'Synthesized ElevenLabs voiceover'
+              : `Spoke voiceover via ${res.synthesisMode || 'system speech'}`
+        );
       }
+
       if (sceneId) {
         const refreshed = await studioApi.getProject(activeProject.id);
         upsertProject(refreshed.project);
       }
-      setLastActionSummary(
-        normalizedSource === 'elevenlabs'
-          ? 'Synthesized ElevenLabs voiceover'
-          : normalizedSource === 'native'
-            ? 'Synthesized native cloned voiceover'
-            : 'Played studio fallback voiceover'
-      );
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Voice synthesis failed.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleUpdateVoice = async (
+    voiceId: string,
+    patch: { playbackMode?: VoicePlaybackMode }
+  ) => {
+    setBusyAction(`update-voice-${voiceId}`);
+    setErrorBanner(null);
+    try {
+      await studioApi.updateVoice(voiceId, patch);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
+      await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      setLastActionSummary(
+        patch.playbackMode === 'direct-sample'
+          ? 'Switched voice to Use Recorded Clip (Direct Sample Mode)'
+          : 'Switched voice to Speak Script mode'
+      );
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update voice.');
     } finally {
       setBusyAction(null);
     }
@@ -661,10 +793,28 @@ export function App() {
           text: scene.narration,
           projectId: activeProject.id,
           sceneId: scene.id,
+          playbackMode: scene.voicePlaybackMode,
         },
         sessionKeys
       );
-      const ext = res.contentType.includes('mpeg') || res.contentType.includes('mp3') ? 'mp3' : 'wav';
+      if (res.kind === 'speech-synthesis') {
+        if (res.fallback.sampleUrl) {
+          const sampleResp = await fetch(res.fallback.sampleUrl);
+          if (sampleResp.ok) {
+            const sampleBlob = await sampleResp.blob();
+            const ext = extensionForAudioMime(sampleBlob.type || 'audio/wav');
+            triggerBlobDownload(sampleBlob, `${sanitizeFilename(scene.title)}-sample.${ext}`);
+            setLastActionSummary(`Downloaded recorded voice sample (${ext.toUpperCase()})`);
+            return;
+          }
+        }
+        setLastActionSummary(
+          'Live browser SpeechSynthesis active (no server WAV file on this host). Connect ElevenLabs or attach a recorded clip to export audio.'
+        );
+        return;
+      }
+
+      const ext = extensionForAudioMime(res.contentType);
       triggerBlobDownload(res.blob, `${sanitizeFilename(scene.title)}-voiceover.${ext}`);
       URL.revokeObjectURL(res.blobUrl);
       setLastActionSummary(`Downloaded voiceover audio (${ext.toUpperCase()}) for "${scene.title}"`);
@@ -706,18 +856,28 @@ export function App() {
           text: params.scene.narration,
           projectId: activeProject.id,
           sceneId: params.scene.id,
+          playbackMode: params.scene.voicePlaybackMode,
         },
         sessionKeys
       );
-      URL.revokeObjectURL(speech.blobUrl);
 
-      const webmBlob = await exportCanvasWithAudioWebm({
+      let voiceBlob: Blob | undefined;
+      if (speech.kind === 'audio') {
+        voiceBlob = speech.blob;
+        URL.revokeObjectURL(speech.blobUrl);
+      }
+
+      const exported = await exportCanvasWithAudioWebm({
         canvas: params.canvas,
-        voiceBlob: speech.blob,
+        voiceBlob,
         durationSec: params.scene.durationSec,
       });
-      triggerBlobDownload(webmBlob, `${sanitizeFilename(params.scene.title)}.webm`);
-      setLastActionSummary(`Exported "${params.scene.title}" video + voiceover (.webm)`);
+      triggerBlobDownload(exported.blob, `${sanitizeFilename(params.scene.title)}.webm`);
+      setLastActionSummary(
+        exported.hasAudioTrack
+          ? `Exported "${params.scene.title}" video + spoken voiceover (.webm)`
+          : `Exported "${params.scene.title}" video (.webm) — browser SpeechSynthesis plays live in studio`
+      );
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Video export failed.');
     } finally {
@@ -1032,6 +1192,7 @@ export function App() {
                 isMuted={isMuted}
                 activeSceneId={activeScene?.id || ''}
                 activeVoiceSource={activeVoiceSource}
+                activeVoiceMode={activeVoiceMode}
                 exportingVideo={busyAction === 'export-video'}
                 onTogglePlay={() => {
                   unlockAudio();
@@ -1081,6 +1242,7 @@ export function App() {
               onPreviewVoice={handlePreviewVoice}
               onDownloadSceneAudio={handleDownloadSceneAudio}
               onPlaySampleUrl={handlePlaySampleUrl}
+              onUpdateVoice={handleUpdateVoice}
               onDeleteVoice={handleDeleteVoice}
               onPushVoiceToElevenLabs={handlePushVoiceToElevenLabs}
               onSyncElevenLabsVoices={handleSyncElevenLabsVoices}

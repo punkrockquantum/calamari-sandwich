@@ -34,6 +34,7 @@ interface PreviewPlayerProps {
   isMuted: boolean;
   activeSceneId: string;
   activeVoiceSource?: 'elevenlabs' | 'native' | 'mock' | null;
+  activeVoiceMode?: 'elevenlabs' | 'direct-sample' | 'system-speech' | null;
   exportingVideo?: boolean;
   onTogglePlay: () => void;
   onToggleMute: () => void;
@@ -113,6 +114,59 @@ function pickActiveExternalJob(scene?: SceneItem): HiggsfieldJobState | undefine
   return scene.higgsfield;
 }
 
+function splitSubtitleSegments(narration: string): string[] {
+  const sentences = narration
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const segments: string[] = [];
+  for (const sentence of sentences) {
+    if (sentence.length <= 125) {
+      segments.push(sentence);
+      continue;
+    }
+    const words = sentence.split(' ');
+    let current = '';
+    for (const word of words) {
+      if ((current ? `${current} ${word}` : word).length > 110) {
+        if (current) segments.push(current);
+        current = word;
+      } else {
+        current = current ? `${current} ${word}` : word;
+      }
+    }
+    if (current) segments.push(current);
+  }
+  return segments.length > 0 ? segments : [narration];
+}
+
+function wrapCanvasText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines = 2
+): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+  for (const w of words) {
+    const test = current ? `${current} ${w}` : w;
+    if (ctx.measureText(test).width > maxWidth && current) {
+      lines.push(current);
+      current = w;
+      if (lines.length >= maxLines) break;
+    } else {
+      current = test;
+    }
+  }
+  if (current && lines.length < maxLines) {
+    lines.push(current);
+  }
+  return lines;
+}
+
 export function PreviewPlayer({
   project,
   assets,
@@ -122,6 +176,7 @@ export function PreviewPlayer({
   isMuted,
   activeSceneId,
   activeVoiceSource,
+  activeVoiceMode,
   exportingVideo = false,
   onTogglePlay,
   onToggleMute,
@@ -135,10 +190,15 @@ export function PreviewPlayer({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const animTimeRef = useRef<number>(0);
+  const exportStartedAtRef = useRef<number | null>(null);
   const currentTimeSecRef = useRef<number>(currentTimeSec);
   currentTimeSecRef.current = currentTimeSec;
   const [failedVideoUrls, setFailedVideoUrls] = useState<string[]>([]);
   const [proxiedVideoKeys, setProxiedVideoKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    exportStartedAtRef.current = exportingVideo ? performance.now() : null;
+  }, [exportingVideo]);
 
   const sceneOffsets = useMemo(() => {
     let acc = 0;
@@ -234,13 +294,11 @@ export function PreviewPlayer({
       ? `RAG Clip: ${ragVideoAsset.name}`
       : null;
 
-  // Reset failed flags when active job updates
   useEffect(() => {
     if (!externalJobKey) return;
     setFailedVideoUrls([]);
   }, [externalJobKey]);
 
-  // Sync <video> element play/pause with timeline without hammering play() every 100ms
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !stageVideoUrl) return;
@@ -254,7 +312,6 @@ export function PreviewPlayer({
     }
   }, [stageVideoUrl, isPlaying, isMuted, activeScene?.id]);
 
-  // Sync <video> element time only on seek, scene change, or significant drift
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !stageVideoUrl || !activeEntry) return;
@@ -268,7 +325,6 @@ export function PreviewPlayer({
     }
   }, [stageVideoUrl, activeEntry?.scene.id, seekEpoch]);
 
-  // Preload uploaded character & RAG asset images for canvas rendering
   useEffect(() => {
     const urlsToPreload = [
       ...project.characters.flatMap((c) => (c.sourceType === 'photos' ? c.mediaUrls : [])),
@@ -284,7 +340,7 @@ export function PreviewPlayer({
     }
   }, [project.characters, assets]);
 
-  // Continuous 60fps Canvas stage rendering with camera motions, RAG photo callouts, character & transitions
+  // Continuous 60fps Canvas stage rendering with chapter cards, bullet reveals, diagrams, character/asset overlays & subtitles
   useEffect(() => {
     let rafId = 0;
     let lastTs = performance.now();
@@ -292,7 +348,7 @@ export function PreviewPlayer({
     const renderFrame = (now: number) => {
       const dt = (now - lastTs) / 1000;
       lastTs = now;
-      animTimeRef.current += isPlaying ? dt : dt * 0.35;
+      animTimeRef.current += isPlaying || exportingVideo ? dt : dt * 0.35;
 
       const canvas = canvasRef.current;
       if (canvas && activeScene && activeEntry) {
@@ -300,7 +356,14 @@ export function PreviewPlayer({
         if (ctx) {
           const w = canvas.width;
           const h = canvas.height;
-          const localElapsed = Math.max(0, currentTimeSecRef.current - activeEntry.startSec);
+          const exportElapsed =
+            exportingVideo && exportStartedAtRef.current !== null
+              ? (now - exportStartedAtRef.current) / 1000
+              : null;
+          const localElapsed =
+            exportElapsed !== null
+              ? exportElapsed
+              : Math.max(0, currentTimeSecRef.current - activeEntry.startSec);
           const progress = Math.min(1, localElapsed / Math.max(1, activeScene.durationSec));
           const t = animTimeRef.current;
           const palette = STYLE_PALETTES[activeScene.cinematicStyle] || STYLE_PALETTES['Neon Lab'];
@@ -348,7 +411,7 @@ export function PreviewPlayer({
           ctx.fillStyle = grad;
           ctx.fillRect(-40, -40, w + 80, h + 80);
 
-          // Subtle studio grid
+          // Studio grid
           ctx.strokeStyle = palette.grid;
           ctx.lineWidth = 1;
           const step = 48;
@@ -372,26 +435,28 @@ export function PreviewPlayer({
           ctx.fillStyle = glow;
           ctx.fillRect(0, 0, w, h);
 
-          // Visual tech overlay region (shifts away from character placement)
+          // Visual tech diagram / asset region
           const charLeft = activeScene.characterPlacement === 'left';
+          const charOff = !activeCharacter || activeScene.characterPlacement === 'offscreen';
           const diagCenterX =
             activeScene.characterPlacement === 'center'
               ? w * 0.5
-              : charLeft
-                ? w * 0.64
-                : w * 0.36;
-          const diagCenterY = h * 0.46;
+              : charOff
+                ? w * 0.34
+                : charLeft
+                  ? w * 0.64
+                  : w * 0.36;
+          const diagCenterY = h * 0.44;
 
           const ragPhotoUrl = ragPhotoAsset?.mediaUrls[0];
           const ragPhotoImg = ragPhotoUrl ? imageCacheRef.current.get(ragPhotoUrl) : undefined;
 
           ctx.save();
           if (ragPhotoAsset && ragPhotoImg && ragPhotoImg.complete && ragPhotoImg.naturalWidth > 0) {
-            // Render uploaded RAG asset photo / diagram framed cleanly on stage with technical callout
-            const boxW = 430;
-            const boxH = 242;
+            const boxW = 410;
+            const boxH = 228;
             const bx = diagCenterX - boxW / 2;
-            const by = diagCenterY - boxH / 2 - 12;
+            const by = diagCenterY - boxH / 2 - 10;
 
             ctx.fillStyle = 'rgba(9, 12, 20, 0.92)';
             ctx.strokeStyle = `${palette.accent}99`;
@@ -411,7 +476,6 @@ export function PreviewPlayer({
             ctx.drawImage(ragPhotoImg, bx + (boxW - dw) / 2, by + (boxH - dh) / 2, dw, dh);
             ctx.restore();
 
-            // Technical callout tag below asset photo
             ctx.fillStyle = 'rgba(9, 9, 14, 0.88)';
             ctx.strokeStyle = `${palette.secondary}88`;
             ctx.lineWidth = 1;
@@ -423,22 +487,22 @@ export function PreviewPlayer({
             ctx.fillStyle = palette.accent;
             ctx.font = '600 11px Inter, system-ui, sans-serif';
             ctx.textAlign = 'left';
-            ctx.fillText(`RAG ASSET • ${ragPhotoAsset.name}`, bx + 12, by + boxH + 26);
+            ctx.fillText(`RAG ASSET • ${ragPhotoAsset.name}`, bx + 12, by + boxH + 25);
 
             ctx.fillStyle = '#cbd5e1';
             ctx.font = '10px ui-monospace, SFMono-Regular, monospace';
-            const specLine = (ragPhotoAsset.technicalSpecs || ragPhotoAsset.description).slice(0, 62);
-            ctx.fillText(specLine, bx + 12, by + boxH + 40);
+            const specLine = (ragPhotoAsset.technicalSpecs || ragPhotoAsset.description).slice(0, 60);
+            ctx.fillText(specLine, bx + 12, by + boxH + 39);
           } else if (
             activeScene.visualOverlay === 'neural-graph' ||
             activeScene.visualOverlay === 'architecture-flow'
           ) {
             const nodes = [
-              { x: diagCenterX - 180, y: diagCenterY - 70, label: 'Input' },
-              { x: diagCenterX - 55, y: diagCenterY - 110, label: 'Encode' },
-              { x: diagCenterX - 55, y: diagCenterY + 25, label: 'Route' },
-              { x: diagCenterX + 75, y: diagCenterY - 45, label: 'Kernel' },
-              { x: diagCenterX + 195, y: diagCenterY - 45, label: 'Output' },
+              { x: diagCenterX - 170, y: diagCenterY - 68, label: 'Input' },
+              { x: diagCenterX - 50, y: diagCenterY - 105, label: 'Encode' },
+              { x: diagCenterX - 50, y: diagCenterY + 25, label: 'Route' },
+              { x: diagCenterX + 75, y: diagCenterY - 40, label: 'Kernel' },
+              { x: diagCenterX + 190, y: diagCenterY - 40, label: 'Output' },
             ];
             const edges = [
               [0, 1],
@@ -468,12 +532,12 @@ export function PreviewPlayer({
             });
 
             nodes.forEach((n, idx) => {
-              const pulse = 1 + Math.sin(t * 2.4 + idx) * 0.08;
+              const pulse = 1 + Math.sin(t * 2.4 + idx) * 0.07;
               ctx.fillStyle = '#0f172a';
               ctx.strokeStyle = idx === 3 ? palette.secondary : palette.accent;
               ctx.lineWidth = 2.5;
               ctx.beginPath();
-              ctx.roundRect(n.x - 40 * pulse, n.y - 20 * pulse, 80 * pulse, 40 * pulse, 10);
+              ctx.roundRect(n.x - 38 * pulse, n.y - 19 * pulse, 76 * pulse, 38 * pulse, 10);
               ctx.fill();
               ctx.stroke();
 
@@ -484,13 +548,13 @@ export function PreviewPlayer({
               ctx.fillText(n.label, n.x, n.y);
             });
           } else if (activeScene.visualOverlay === 'code-terminal') {
-            const bx = diagCenterX - 200;
-            const by = diagCenterY - 115;
-            ctx.fillStyle = 'rgba(9, 12, 20, 0.86)';
+            const bx = diagCenterX - 195;
+            const by = diagCenterY - 110;
+            ctx.fillStyle = 'rgba(9, 12, 20, 0.88)';
             ctx.strokeStyle = `${palette.accent}88`;
             ctx.lineWidth = 1.5;
             ctx.beginPath();
-            ctx.roundRect(bx, by, 400, 210, 12);
+            ctx.roundRect(bx, by, 390, 200, 12);
             ctx.fill();
             ctx.stroke();
 
@@ -503,31 +567,98 @@ export function PreviewPlayer({
               `});`,
               `await pipeline.step(activeTensor);`,
             ];
-            ctx.font = '13px ui-monospace, SFMono-Regular, monospace';
+            ctx.font = '12.5px ui-monospace, SFMono-Regular, monospace';
             ctx.textAlign = 'left';
             lines.forEach((line, i) => {
-              const reveal = Math.min(1, Math.max(0, progress * 3.5 - i * 0.25));
-              if (reveal > 0.05) {
-                ctx.fillStyle = i === 0 ? palette.accent : i === 6 ? palette.secondary : '#cbd5e1';
-                ctx.fillText(line.slice(0, Math.ceil(line.length * reveal)), bx + 18, by + 34 + i * 25);
-              }
+              const reveal = Math.min(1, Math.max(0.15, progress * 3.5 - i * 0.2));
+              ctx.fillStyle = i === 0 ? palette.accent : i === 6 ? palette.secondary : '#cbd5e1';
+              ctx.fillText(line.slice(0, Math.ceil(line.length * reveal)), bx + 16, by + 32 + i * 24);
             });
+          } else if (activeScene.visualOverlay === 'packet-stream') {
+            const bx = diagCenterX - 195;
+            const by = diagCenterY - 102;
+            ctx.fillStyle = 'rgba(9, 12, 20, 0.78)';
+            ctx.strokeStyle = `${palette.accent}55`;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(bx, by, 390, 188, 12);
+            ctx.fill();
+            ctx.stroke();
+
+            for (let lane = 0; lane < 4; lane++) {
+              const ly = by + 34 + lane * 40;
+              ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(bx + 24, ly);
+              ctx.lineTo(bx + 366, ly);
+              ctx.stroke();
+
+              for (let pkt = 0; pkt < 3; pkt++) {
+                const pos = ((t * (0.45 + lane * 0.08) + pkt * 0.34) % 1);
+                const px = bx + 26 + pos * 320;
+                ctx.fillStyle = lane % 2 === 0 ? palette.accent : palette.secondary;
+                ctx.beginPath();
+                ctx.roundRect(px, ly - 8, 22, 16, 4);
+                ctx.fill();
+              }
+            }
           } else {
-            const barCount = 26;
-            const totalW = 390;
+            const barCount = 24;
+            const totalW = 360;
             const startX = diagCenterX - totalW / 2;
             for (let i = 0; i < barCount; i++) {
               const amp = 0.25 + 0.75 * Math.abs(Math.sin(t * 2.8 + i * 0.42));
-              const bh = amp * 130;
+              const bh = amp * 124;
               ctx.fillStyle = i % 2 === 0 ? palette.accent : palette.secondary;
-              ctx.globalAlpha = 0.78;
+              ctx.globalAlpha = 0.8;
               ctx.beginPath();
-              ctx.roundRect(startX + i * 15, diagCenterY + 55 - bh, 9, bh, 4);
+              ctx.roundRect(startX + i * 15, diagCenterY + 50 - bh, 9, bh, 4);
               ctx.fill();
             }
             ctx.globalAlpha = 1;
           }
           ctx.restore();
+
+          // Animated Bullet Reveals card (keyPoints) placed neatly above character or opposite side
+          if (activeScene.keyPoints && activeScene.keyPoints.length > 0 && activeScene.characterPlacement !== 'center') {
+            const bullets = activeScene.keyPoints.slice(0, 3);
+            const cardW = 350;
+            const cardH = 34 + bullets.length * 28;
+            const cardX = charOff ? w - cardW - 24 : charLeft ? 24 : w - cardW - 24;
+            const cardY = charOff ? h * 0.24 : 58;
+
+            ctx.save();
+            ctx.fillStyle = 'rgba(9, 12, 22, 0.84)';
+            ctx.strokeStyle = `${palette.accent}66`;
+            ctx.lineWidth = 1.25;
+            ctx.beginPath();
+            ctx.roundRect(cardX, cardY, cardW, cardH, 10);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = palette.accent;
+            ctx.font = '700 11.5px Inter, system-ui, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('KEY TAKEAWAYS', cardX + 14, cardY + 20);
+
+            bullets.forEach((pt, idx) => {
+              const revealAt = idx * 0.16;
+              const alpha = Math.min(1, Math.max(0.32, (progress + 0.18 - revealAt) * 4));
+              const slideX = (1 - alpha) * 12;
+              ctx.globalAlpha = alpha;
+              ctx.fillStyle = palette.secondary;
+              ctx.beginPath();
+              ctx.arc(cardX + 18 + slideX, cardY + 42 + idx * 27, 3.5, 0, Math.PI * 2);
+              ctx.fill();
+
+              ctx.fillStyle = '#f1f5f9';
+              ctx.font = '500 13px Inter, system-ui, sans-serif';
+              const trimmed = pt.length > 42 ? `${pt.slice(0, 39)}...` : pt;
+              ctx.fillText(trimmed, cardX + 29 + slideX, cardY + 46 + idx * 27);
+            });
+            ctx.restore();
+          }
 
           // Render cloned character on stage if not offscreen
           if (activeCharacter && activeScene.characterPlacement !== 'offscreen') {
@@ -539,8 +670,8 @@ export function PreviewPlayer({
                   : activeScene.characterPlacement === 'split'
                     ? w * 0.8
                     : w * 0.81;
-            const cy = h * 0.52;
-            const radius = activeScene.characterPlacement === 'center' ? 78 : 72;
+            const cy = activeScene.characterPlacement === 'center' ? h * 0.5 : h * 0.57;
+            const radius = activeScene.characterPlacement === 'center' ? 72 : 58;
 
             const speakAmp = isPlaying ? 1 + Math.abs(Math.sin(t * 7.5)) * 0.14 : 1.03;
             ctx.strokeStyle = activeCharacter.previewColor;
@@ -573,10 +704,10 @@ export function PreviewPlayer({
 
               ctx.fillStyle = 'rgba(255,255,255,0.92)';
               ctx.beginPath();
-              ctx.arc(cx, cy - 12, 22, 0, Math.PI * 2);
+              ctx.arc(cx, cy - 12, 21, 0, Math.PI * 2);
               ctx.fill();
               ctx.beginPath();
-              ctx.arc(cx, cy + 54, 44, Math.PI, 0);
+              ctx.arc(cx, cy + 50, 42, Math.PI, 0);
               ctx.fill();
             }
             ctx.restore();
@@ -591,61 +722,91 @@ export function PreviewPlayer({
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
             ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.roundRect(cx - 86, cy + radius + 14, 172, 38, 8);
+            ctx.roundRect(cx - 84, cy + radius + 12, 168, 36, 8);
             ctx.fill();
             ctx.stroke();
 
             ctx.fillStyle = '#f8fafc';
-            ctx.font = '600 12px Inter, system-ui, sans-serif';
+            ctx.font = '600 11.5px Inter, system-ui, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText(activeCharacter.name, cx, cy + radius + 30);
+            ctx.fillText(activeCharacter.name, cx, cy + radius + 27);
             ctx.fillStyle = '#94a3b8';
-            ctx.font = '10px Inter, system-ui, sans-serif';
-            ctx.fillText(activeCharacter.stylePreset, cx, cy + radius + 44);
+            ctx.font = '9.5px Inter, system-ui, sans-serif';
+            ctx.fillText(activeCharacter.stylePreset, cx, cy + radius + 40);
           }
 
           ctx.restore();
 
+          // Scene Transitions (0..0.7s)
           if (localElapsed < 0.7) {
-            const alpha = 1 - localElapsed / 0.7;
+            const p = localElapsed / 0.7;
+            const alpha = 1 - p;
             if (activeScene.transitionIn === 'Glitch Cut') {
-              ctx.fillStyle = `${palette.accent}`;
+              ctx.fillStyle = palette.accent;
               ctx.globalAlpha = alpha * 0.35;
               ctx.fillRect(0, (t * 900) % h, w, 18);
               ctx.globalAlpha = 1;
-            } else {
+            } else if (activeScene.transitionIn === 'Iris Wipe') {
+              ctx.save();
               ctx.fillStyle = '#050509';
-              ctx.globalAlpha = alpha * 0.65;
+              ctx.beginPath();
+              ctx.rect(0, 0, w, h);
+              ctx.arc(w / 2, h / 2, Math.max(20, p * w * 0.72), 0, Math.PI * 2, true);
+              ctx.fill();
+              ctx.restore();
+            } else if (activeScene.transitionIn === 'Whip Pan') {
+              ctx.fillStyle = 'rgba(9, 12, 24, 0.72)';
+              ctx.globalAlpha = alpha * 0.75;
+              ctx.fillRect(0, 0, w * alpha, h);
+              ctx.globalAlpha = 1;
+            } else {
+              ctx.fillStyle = activeScene.transitionIn === 'Match Cut' ? palette.accent : '#050509';
+              ctx.globalAlpha = alpha * (activeScene.transitionIn === 'Match Cut' ? 0.25 : 0.65);
               ctx.fillRect(0, 0, w, h);
               ctx.globalAlpha = 1;
             }
           }
 
-          ctx.fillStyle = 'rgba(9, 9, 13, 0.72)';
-          ctx.beginPath();
-          ctx.roundRect(18, 16, 400, 30, 8);
-          ctx.fill();
-          ctx.fillStyle = palette.accent;
-          ctx.font = '600 11px Inter, system-ui, sans-serif';
-          ctx.textAlign = 'left';
-          ctx.fillText(
-            `${activeChapter?.title || 'Chapter'}  •  ${activeScene.cameraMotion}`,
-            30,
-            35
-          );
-
+          // Top Chapter Card Badge
           ctx.fillStyle = 'rgba(9, 9, 13, 0.82)';
           ctx.beginPath();
-          ctx.roundRect(44, h - 78, w - 88, 56, 10);
+          ctx.roundRect(18, 14, 460, 34, 8);
           ctx.fill();
+          ctx.fillStyle = palette.accent;
+          ctx.font = '600 13px Inter, system-ui, sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText(
+            `${activeChapter?.title || 'Chapter'}  •  ${activeScene.title}`,
+            30,
+            36
+          );
+
+          // Live Timed Narration Subtitles (2-line wrapped)
+          const segments = splitSubtitleSegments(activeScene.narration);
+          const segIndex = Math.min(
+            segments.length - 1,
+            Math.floor(progress * segments.length)
+          );
+          const activeSubtitle = segments[segIndex] || activeScene.narration;
+
+          ctx.fillStyle = 'rgba(9, 9, 13, 0.86)';
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(36, h - 84, w - 72, 64, 10);
+          ctx.fill();
+          ctx.stroke();
+
           ctx.fillStyle = '#f4f4f5';
-          ctx.font = '500 14px Inter, system-ui, sans-serif';
+          ctx.font = '500 16px Inter, system-ui, sans-serif';
           ctx.textAlign = 'center';
-          const caption =
-            activeScene.narration.length > 105
-              ? `${activeScene.narration.slice(0, 102)}...`
-              : activeScene.narration;
-          ctx.fillText(caption, w / 2, h - 45);
+          const lines = wrapCanvasText(ctx, activeSubtitle, w - 120, 2);
+          if (lines.length === 1) {
+            ctx.fillText(lines[0], w / 2, h - 46);
+          } else {
+            ctx.fillText(lines[0], w / 2, h - 56);
+            ctx.fillText(lines[1], w / 2, h - 34);
+          }
         }
       }
 
@@ -654,7 +815,7 @@ export function PreviewPlayer({
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, isPlaying]);
+  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, isPlaying, exportingVideo]);
 
   const activeIndex = sceneOffsets.findIndex((e) => e.scene.id === activeScene?.id);
 
@@ -669,6 +830,15 @@ export function PreviewPlayer({
 
   const isExternalPolling =
     activeExternalJob?.status === 'queued' || activeExternalJob?.status === 'generating';
+
+  const voiceBadgeLabel =
+    activeVoiceMode === 'direct-sample'
+      ? 'Direct Clip VO'
+      : activeVoiceSource === 'elevenlabs'
+        ? 'ElevenLabs VO'
+        : activeVoiceSource === 'native'
+          ? 'System Speech (Native)'
+          : 'System Speech VO';
 
   return (
     <div className="shrink-0 flex flex-col bg-[#0d0d14] border border-zinc-800/90 rounded-xl overflow-hidden shadow-2xl">
@@ -692,16 +862,12 @@ export function PreviewPlayer({
               className={`text-[10px] px-2 py-0.5 rounded-full border ${
                 activeVoiceSource === 'elevenlabs'
                   ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-                  : activeVoiceSource === 'native'
-                    ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
-                    : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+                  : activeVoiceMode === 'direct-sample'
+                    ? 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                    : 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
               }`}
             >
-              {activeVoiceSource === 'elevenlabs'
-                ? 'ElevenLabs VO'
-                : activeVoiceSource === 'native'
-                  ? 'Native Cloned VO'
-                  : 'Demo VO'}
+              {voiceBadgeLabel}
             </span>
           )}
           <span
@@ -862,7 +1028,7 @@ export function PreviewPlayer({
                 type="button"
                 onClick={() => onDownloadSceneAudio(activeScene)}
                 className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 transition"
-                title="Download synthesized voiceover audio for this scene"
+                title="Download scene voiceover audio (when server WAV/ElevenLabs/clip is available)"
               >
                 <Download className="w-3 h-3 text-amber-400" />
                 <span className="hidden sm:inline">Audio</span>
@@ -880,7 +1046,7 @@ export function PreviewPlayer({
                   })
                 }
                 className="inline-flex items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 disabled:opacity-50 px-2 py-1 text-[11px] text-cyan-200 transition"
-                title="Export rendered scene video with voiceover"
+                title="Export rendered scene video (.webm)"
               >
                 {exportingVideo ? (
                   <Loader2 className="w-3 h-3 animate-spin" />

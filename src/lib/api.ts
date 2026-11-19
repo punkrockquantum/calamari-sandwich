@@ -10,6 +10,8 @@ import type {
   RagContextMatch,
   SceneItem,
   TechAsset,
+  TtsBrowserFallback,
+  VoicePlaybackMode,
   VoiceProfile,
 } from '@shared/types';
 import {
@@ -155,15 +157,31 @@ export const studioApi = {
   },
 
   async synthesizeSpeech(
-    params: { voiceId: string; text: string; projectId?: string; sceneId?: string },
+    params: {
+      voiceId: string;
+      text: string;
+      projectId?: string;
+      sceneId?: string;
+      playbackMode?: 'auto' | VoicePlaybackMode;
+    },
     keys?: Partial<SessionConnectorKeys>
-  ): Promise<{
-    blobUrl: string;
-    blob: Blob;
-    contentType: string;
-    source: string;
-    fallbackReason?: string;
-  }> {
+  ): Promise<
+    | {
+        kind: 'audio';
+        blobUrl: string;
+        blob: Blob;
+        contentType: string;
+        source: string;
+        synthesisMode?: string;
+        fallbackReason?: string;
+      }
+    | {
+        kind: 'speech-synthesis';
+        fallback: TtsBrowserFallback;
+        source: string;
+        fallbackReason?: string;
+      }
+  > {
     const res = await fetch('/api/tts', {
       method: 'POST',
       headers: {
@@ -177,13 +195,29 @@ export const studioApi = {
       throw new Error(err.error || 'TTS failed');
     }
     const contentType = res.headers.get('content-type') || 'audio/wav';
+    const source = res.headers.get('X-Voice-Source') || 'mock';
+    const synthesisMode = res.headers.get('X-Voice-Synthesis-Mode') || undefined;
+    const fallbackReason = res.headers.get('X-Voice-Fallback-Reason') || undefined;
+
+    if (contentType.includes('application/json')) {
+      const fallback = (await res.json()) as TtsBrowserFallback;
+      return {
+        kind: 'speech-synthesis',
+        fallback,
+        source,
+        fallbackReason: fallbackReason || fallback.fallbackReason,
+      };
+    }
+
     const blob = await res.blob();
     return {
+      kind: 'audio',
       blobUrl: URL.createObjectURL(blob),
       blob,
       contentType,
-      source: res.headers.get('X-Voice-Source') || 'mock',
-      fallbackReason: res.headers.get('X-Voice-Fallback-Reason') || undefined,
+      source,
+      synthesisMode,
+      fallbackReason,
     };
   },
 
@@ -227,6 +261,16 @@ export const studioApi = {
       method: 'POST',
       body: formData,
     });
+  },
+
+  updateVoice(voiceId: string, patch: { playbackMode?: VoicePlaybackMode; name?: string; description?: string }) {
+    return requestJson<{ voice: VoiceProfile }>(
+      `/api/voices/${encodeURIComponent(voiceId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
   },
 
   deleteVoice(voiceId: string) {
