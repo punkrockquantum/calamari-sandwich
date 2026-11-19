@@ -10,6 +10,7 @@ import {
   Database,
   Download,
   Film,
+  GripVertical,
   Loader2,
   LogIn,
   Mic,
@@ -44,12 +45,50 @@ import type {
   SceneItem,
   SceneVisualOverlay,
   TechAsset,
+  TimelineDragPayload,
   TransitionType,
   VoicePlaybackMode,
   VoiceProfile,
 } from '@shared/types';
 
-type InspectorTab = 'scene' | 'characters' | 'voices' | 'sources' | 'assets' | 'music';
+export type InspectorTab = 'scene' | 'characters' | 'voices' | 'sources' | 'assets' | 'music';
+
+export const STUDIO_MUSIC_PRESETS: Array<{
+  title: string;
+  mood: string;
+  bpm: number;
+  volumeDb: number;
+  accentColor: string;
+}> = [
+  {
+    title: 'Silicon Horizon',
+    mood: 'Focused Tech Ambient',
+    bpm: 108,
+    volumeDb: -16,
+    accentColor: '#10b981',
+  },
+  {
+    title: 'Midnight Synthwave',
+    mood: 'Upbeat Electronic',
+    bpm: 118,
+    volumeDb: -15,
+    accentColor: '#a855f7',
+  },
+  {
+    title: 'Quantum Minimalist',
+    mood: 'Minimalist Pluck',
+    bpm: 96,
+    volumeDb: -18,
+    accentColor: '#06b6d4',
+  },
+  {
+    title: 'Telemetry Rising',
+    mood: 'Inspiring Synth',
+    bpm: 124,
+    volumeDb: -14,
+    accentColor: '#3b82f6',
+  },
+];
 
 interface InspectorPanelProps {
   project: ExplainerProject;
@@ -60,6 +99,11 @@ interface InspectorPanelProps {
   allCharacters: CharacterProfile[];
   assets: TechAsset[];
   sources: ImportedSource[];
+  activeTab?: InspectorTab;
+  onTabChange?: (tab: InspectorTab) => void;
+  selectedMusicTrackId?: string | null;
+  onDragStartPayload?: (payload: TimelineDragPayload) => void;
+  onDragEndPayload?: () => void;
   lastVoicePushResult?: PushVoiceElevenLabsResult | null;
   onUpdateScene: (sceneId: string, patch: Partial<SceneItem>) => Promise<void>;
   onTriggerHiggsfield: (sceneId: string) => Promise<void>;
@@ -88,6 +132,7 @@ interface InspectorPanelProps {
   onGenerateFromSource: (source: ImportedSource) => Promise<void>;
   onDeleteAsset: (assetId: string) => Promise<void>;
   onAddMusicTrack: (track: Omit<MusicTrack, 'id'>) => Promise<void>;
+  onUpdateMusicTrack?: (trackId: string, patch: Partial<MusicTrack>) => Promise<void>;
   onDeleteMusicTrack: (trackId: string) => Promise<void>;
   busyAction: string | null;
 }
@@ -161,6 +206,11 @@ export function InspectorPanel({
   allCharacters,
   assets,
   sources,
+  activeTab,
+  onTabChange,
+  selectedMusicTrackId,
+  onDragStartPayload,
+  onDragEndPayload,
   lastVoicePushResult,
   onUpdateScene,
   onTriggerHiggsfield,
@@ -185,10 +235,30 @@ export function InspectorPanel({
   onGenerateFromSource,
   onDeleteAsset,
   onAddMusicTrack,
+  onUpdateMusicTrack,
   onDeleteMusicTrack,
   busyAction,
 }: InspectorPanelProps) {
-  const [tab, setTab] = useState<InspectorTab>('scene');
+  const [internalTab, setInternalTab] = useState<InspectorTab>('scene');
+  const tab = activeTab ?? internalTab;
+  const setTab = (next: InspectorTab) => {
+    setInternalTab(next);
+    onTabChange?.(next);
+  };
+
+  const makeDraggableProps = (payload: TimelineDragPayload) => ({
+    draggable: true,
+    onDragStart: (e: React.DragEvent) => {
+      const json = JSON.stringify(payload);
+      e.dataTransfer.setData('application/x-calamari-drag', json);
+      e.dataTransfer.setData('text/plain', json);
+      e.dataTransfer.effectAllowed = 'copy';
+      onDragStartPayload?.(payload);
+    },
+    onDragEnd: () => {
+      onDragEndPayload?.();
+    },
+  });
   const [musicTitle, setMusicTitle] = useState('Neural Drift');
   const [musicMood, setMusicMood] = useState('Ambient Tech');
   const [musicBpm, setMusicBpm] = useState(110);
@@ -931,13 +1001,21 @@ export function InspectorPanel({
                 return (
                   <div
                     key={char.id}
-                    className={`rounded-xl border p-2.5 transition ${
+                    data-testid={`draggable-character-${char.id}`}
+                    {...makeDraggableProps({
+                      kind: 'character',
+                      characterId: char.id,
+                      name: char.name,
+                      voiceId: char.voiceId,
+                    })}
+                    className={`rounded-xl border p-2.5 transition cursor-grab active:cursor-grabbing ${
                       isOnActiveScene
                         ? 'border-cyan-500/50 bg-cyan-950/20'
-                        : 'border-zinc-800 bg-zinc-950/70'
+                        : 'border-zinc-800 bg-zinc-950/70 hover:border-cyan-500/40'
                     }`}
                   >
                     <div className="flex items-start gap-2.5">
+                      <GripVertical className="w-3.5 h-3.5 text-zinc-600 shrink-0 mt-1" />
                       {char.sourceType === 'photos' && char.mediaUrls[0] ? (
                         <img
                           src={char.mediaUrls[0]}
@@ -1159,14 +1237,24 @@ export function InspectorPanel({
                 return (
                   <div
                     key={v.voice_id}
-                    className={`rounded-xl border p-2.5 space-y-2 ${
+                    data-testid={`draggable-voice-${v.voice_id}`}
+                    {...makeDraggableProps({
+                      kind: 'voice',
+                      voiceId: v.voice_id,
+                      name: v.name,
+                      sampleUrl: v.sampleUrl,
+                      playbackMode: v.playbackMode,
+                    })}
+                    className={`rounded-xl border p-2.5 space-y-2 cursor-grab active:cursor-grabbing transition ${
                       isPrimary || isSelected
                         ? 'border-amber-500/50 bg-amber-950/15'
-                        : 'border-zinc-800 bg-zinc-950/70'
+                        : 'border-zinc-800 bg-zinc-950/70 hover:border-amber-500/40'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex items-start gap-1.5">
+                        <GripVertical className="w-3.5 h-3.5 text-zinc-600 shrink-0 mt-0.5" />
+                        <div className="min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs font-semibold text-zinc-100 truncate">
                             {v.name}
@@ -1240,6 +1328,7 @@ export function InspectorPanel({
                             {isSelected ? 'Scene Active' : 'Scene'}
                           </button>
                         )}
+                      </div>
                       </div>
                     </div>
 
@@ -1366,19 +1455,29 @@ export function InspectorPanel({
                   return (
                     <div
                       key={src.id}
-                      className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-2.5 space-y-2"
+                      data-testid={`draggable-source-${src.id}`}
+                      {...makeDraggableProps({
+                        kind: 'source',
+                        sourceId: src.id,
+                        name: src.name,
+                        sourceType: src.sourceType,
+                      })}
+                      className="rounded-xl border border-zinc-800 hover:border-cyan-500/40 bg-zinc-950/80 p-2.5 space-y-2 cursor-grab active:cursor-grabbing transition"
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[9px] uppercase rounded px-1.5 py-0.5 bg-cyan-500/15 border border-cyan-500/35 text-cyan-200 font-semibold shrink-0">
-                              {src.sourceType}
-                            </span>
-                            <span className="text-xs font-semibold text-zinc-100 truncate">
-                              {src.name}
-                            </span>
+                        <div className="min-w-0 flex items-start gap-1.5">
+                          <GripVertical className="w-3.5 h-3.5 text-zinc-600 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[9px] uppercase rounded px-1.5 py-0.5 bg-cyan-500/15 border border-cyan-500/35 text-cyan-200 font-semibold shrink-0">
+                                {src.sourceType}
+                              </span>
+                              <span className="text-xs font-semibold text-zinc-100 truncate">
+                                {src.name}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-zinc-400 mt-0.5">{src.summary}</div>
                           </div>
-                          <div className="text-[10px] text-zinc-400 mt-0.5">{src.summary}</div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
                           <button
@@ -1415,7 +1514,13 @@ export function InspectorPanel({
                           {src.slides.map((sl) => (
                             <div
                               key={sl.index}
-                              className="rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2 space-y-1"
+                              {...makeDraggableProps({
+                                kind: 'source-slide',
+                                sourceId: src.id,
+                                slideIndex: sl.index,
+                                title: sl.title,
+                              })}
+                              className="rounded-lg border border-zinc-800/80 hover:border-cyan-500/40 bg-zinc-900/60 p-2 space-y-1 cursor-grab active:cursor-grabbing"
                             >
                               <div className="text-[11px] font-semibold text-cyan-200">
                                 {sl.index}. {sl.title}
@@ -1509,13 +1614,22 @@ export function InspectorPanel({
                 return (
                   <div
                     key={asset.id}
-                    className={`rounded-xl border p-2.5 space-y-2 ${
+                    data-testid={`draggable-asset-${asset.id}`}
+                    {...makeDraggableProps({
+                      kind: 'asset',
+                      assetId: asset.id,
+                      name: asset.name,
+                      sourceType: asset.sourceType,
+                      mediaUrl: asset.mediaUrls[0],
+                    })}
+                    className={`rounded-xl border p-2.5 space-y-2 cursor-grab active:cursor-grabbing transition ${
                       isAttached
                         ? 'border-indigo-500/50 bg-indigo-950/20'
-                        : 'border-zinc-800 bg-zinc-950/70'
+                        : 'border-zinc-800 bg-zinc-950/70 hover:border-indigo-500/40'
                     }`}
                   >
-                    <div className="flex items-start gap-2.5">
+                    <div className="flex items-start gap-2">
+                      <GripVertical className="w-3.5 h-3.5 text-zinc-600 shrink-0 mt-1" />
                       {asset.sourceType === 'photos' && asset.mediaUrls[0] ? (
                         <img
                           src={asset.mediaUrls[0]}
@@ -1640,30 +1754,145 @@ export function InspectorPanel({
               </button>
             </form>
 
-            <div className="space-y-2">
-              {project.musicTracks.map((track) => (
-                <div
-                  key={track.id}
-                  className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-2.5 flex items-center justify-between gap-2"
-                >
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-zinc-100 truncate">
-                      {track.title}
-                    </div>
-                    <div className="text-[10px] text-zinc-400">
-                      {track.mood} • {track.bpm} BPM • {track.volumeDb} dB
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void onDeleteMusicTrack(track.id)}
-                    className="p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-900"
-                    title="Remove Track"
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                Draggable Music Presets (Drop onto Music Track)
+              </div>
+              <div className="grid grid-cols-1 gap-1.5">
+                {STUDIO_MUSIC_PRESETS.map((preset) => (
+                  <div
+                    key={preset.title}
+                    data-testid={`draggable-music-preset-${preset.title.toLowerCase().replace(/\s+/g, '-')}`}
+                    {...makeDraggableProps({
+                      kind: 'music-preset',
+                      title: preset.title,
+                      mood: preset.mood,
+                      bpm: preset.bpm,
+                      volumeDb: preset.volumeDb,
+                      accentColor: preset.accentColor,
+                    })}
+                    className="rounded-lg border border-zinc-800 hover:border-emerald-500/50 bg-zinc-950/80 px-2.5 py-2 flex items-center justify-between gap-2 cursor-grab active:cursor-grabbing transition"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <GripVertical className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: preset.accentColor }}
+                      />
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-zinc-100 truncate">
+                          {preset.title}
+                        </div>
+                        <div className="text-[10px] text-zinc-400 truncate">
+                          {preset.mood} • {preset.bpm} BPM • {preset.volumeDb} dB
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const totalSec = project.scenes.reduce((s, sc) => s + sc.durationSec, 0);
+                        void onAddMusicTrack({
+                          title: preset.title,
+                          mood: preset.mood,
+                          bpm: preset.bpm,
+                          startTimeSec: 0,
+                          durationSec: Math.max(20, Math.round(totalSec / 2)),
+                          volumeDb: preset.volumeDb,
+                          duckUnderVoice: true,
+                          accentColor: preset.accentColor,
+                        });
+                      }}
+                      className="px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 text-[10px] font-medium text-emerald-200 shrink-0"
+                    >
+                      + Add
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {project.musicTracks.map((track) => {
+                const isSelectedTrack = selectedMusicTrackId === track.id;
+                return (
+                  <div
+                    key={track.id}
+                    className={`rounded-xl border p-2.5 space-y-2 transition ${
+                      isSelectedTrack
+                        ? 'border-emerald-400/70 bg-emerald-950/25'
+                        : 'border-zinc-800 bg-zinc-950/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-zinc-100 truncate">
+                          {track.title}
+                        </div>
+                        <div className="text-[10px] text-zinc-400">
+                          {track.mood} • {track.bpm} BPM • {track.volumeDb} dB • {track.startTimeSec}s–
+                          {track.startTimeSec + track.durationSec}s
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void onDeleteMusicTrack(track.id)}
+                        className="p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-900"
+                        title="Remove Track"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {isSelectedTrack && onUpdateMusicTrack && (
+                      <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-emerald-500/20">
+                        <label className="text-[10px] text-zinc-400">
+                          Start (s)
+                          <input
+                            type="number"
+                            min={0}
+                            value={track.startTimeSec}
+                            onChange={(e) =>
+                              void onUpdateMusicTrack(track.id, {
+                                startTimeSec: Math.max(0, Number(e.target.value) || 0),
+                              })
+                            }
+                            className="mt-0.5 w-full rounded bg-zinc-900 border border-zinc-700 px-1.5 py-1 text-[11px] font-mono text-zinc-100"
+                          />
+                        </label>
+                        <label className="text-[10px] text-zinc-400">
+                          Dur (s)
+                          <input
+                            type="number"
+                            min={5}
+                            value={track.durationSec}
+                            onChange={(e) =>
+                              void onUpdateMusicTrack(track.id, {
+                                durationSec: Math.max(5, Number(e.target.value) || 5),
+                              })
+                            }
+                            className="mt-0.5 w-full rounded bg-zinc-900 border border-zinc-700 px-1.5 py-1 text-[11px] font-mono text-zinc-100"
+                          />
+                        </label>
+                        <label className="text-[10px] text-zinc-400">
+                          Vol (dB)
+                          <input
+                            type="number"
+                            min={-40}
+                            max={0}
+                            value={track.volumeDb}
+                            onChange={(e) =>
+                              void onUpdateMusicTrack(track.id, {
+                                volumeDb: Math.max(-40, Math.min(0, Number(e.target.value) || -16)),
+                              })
+                            }
+                            className="mt-0.5 w-full rounded bg-zinc-900 border border-zinc-700 px-1.5 py-1 text-[11px] font-mono text-zinc-100"
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

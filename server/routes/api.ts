@@ -78,6 +78,32 @@ const GenerateProjectSchema = z.object({
   assetIds: z.array(z.string()).optional(),
   sourceIds: z.array(z.string()).optional(),
   autoGenerateVisuals: z.boolean().optional(),
+  cinematicStyle: z
+    .enum(['Neon Lab', 'Anamorphic Studio', 'Blueprint Isometric', 'Editorial Documentary', 'Quantum Noir'])
+    .optional(),
+  animationPreset: z
+    .enum([
+      'diagram-flow',
+      'kinetic-cards',
+      'slide-deck-reveal',
+      'data-pulse',
+      'split-comparison',
+      'timeline-walkthrough',
+      'particle-network',
+    ])
+    .optional(),
+  diagramType: z
+    .enum(['auto', 'architecture', 'flow', 'comparison', 'infographic', 'hardware'])
+    .optional(),
+  musicPreset: z
+    .object({
+      title: z.string().min(1).max(120),
+      mood: z.string().min(1).max(80),
+      bpm: z.number().min(50).max(200),
+      volumeDb: z.number().min(-40).max(0),
+      accentColor: z.string().max(20).optional(),
+    })
+    .optional(),
 });
 
 const PrimaryVoiceSchema = z.object({
@@ -133,6 +159,8 @@ const ConnectConnectorSchema = z.object({
 const UpdateSceneSchema = z.object({
   title: z.string().min(1).max(160).optional(),
   durationSec: z.number().min(5).max(300).optional(),
+  trimStartSec: z.number().min(0).max(295).optional(),
+  order: z.number().int().min(0).optional(),
   narration: z.string().min(1).max(5000).optional(),
   visualPrompt: z.string().min(1).max(2000).optional(),
   visualOverlay: z
@@ -161,12 +189,37 @@ const UpdateSceneSchema = z.object({
     .optional(),
   characterId: z.string().optional().nullable(),
   characterPlacement: z.enum(['left', 'center', 'right', 'split', 'offscreen']).optional(),
+  characterStartSec: z.number().min(0).max(3600).optional().nullable(),
+  characterDurationSec: z.number().min(2).max(600).optional().nullable(),
   voiceId: z.string().min(1).max(120).optional(),
   voicePlaybackMode: z.enum(['auto', 'speak-script', 'direct-sample']).optional(),
   voiceAudioUrl: z.string().max(500).optional().nullable(),
+  voiceStartSec: z.number().min(0).max(3600).optional().nullable(),
+  voiceDurationSec: z.number().min(2).max(600).optional().nullable(),
+  voiceTrimStartSec: z.number().min(0).max(295).optional(),
+  voiceEnabled: z.boolean().optional(),
   keyPoints: z.array(z.string()).optional(),
   assetIds: z.array(z.string()).optional(),
   activeVideoProvider: z.enum(['higgsfield', 'gemini_veo']).optional().nullable(),
+});
+
+const ReorderScenesSchema = z.object({
+  sceneIds: z.array(z.string().min(1)).min(1),
+  historySummary: z.string().max(200).optional(),
+});
+
+const CreateSceneSchema = z.object({
+  title: z.string().min(1).max(160).optional(),
+  durationSec: z.number().min(5).max(300).optional(),
+  narration: z.string().min(1).max(5000).optional(),
+  visualPrompt: z.string().min(1).max(2000).optional(),
+  assetIds: z.array(z.string()).optional(),
+  sourceId: z.string().optional(),
+  sourceSlideIndex: z.number().int().min(1).optional(),
+  generatedVisualUrl: z.string().max(500).optional(),
+  characterId: z.string().optional(),
+  voiceId: z.string().optional(),
+  insertAtIndex: z.number().int().min(0).optional(),
 });
 
 const AddMusicSchema = z.object({
@@ -178,6 +231,65 @@ const AddMusicSchema = z.object({
   volumeDb: z.number().min(-40).max(0),
   duckUnderVoice: z.boolean().default(true),
   accentColor: z.string().max(20).optional(),
+});
+
+const UpdateMusicSchema = z.object({
+  title: z.string().min(1).max(120).optional(),
+  mood: z.string().min(1).max(80).optional(),
+  bpm: z.number().min(50).max(200).optional(),
+  startTimeSec: z.number().min(0).max(3600).optional(),
+  durationSec: z.number().min(5).max(1800).optional(),
+  volumeDb: z.number().min(-40).max(0).optional(),
+  duckUnderVoice: z.boolean().optional(),
+  accentColor: z.string().max(20).optional(),
+});
+
+const TimelineDropSchema = z.object({
+  track: z.enum(['scene', 'character', 'voiceover', 'music']),
+  dropSec: z.number().min(0).max(3600),
+  targetSceneId: z.string().optional(),
+  payload: z.discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('asset'),
+      assetId: z.string().min(1),
+      name: z.string().optional(),
+      sourceType: z.enum(['photos', 'video']).optional(),
+      mediaUrl: z.string().optional(),
+    }),
+    z.object({
+      kind: z.literal('source'),
+      sourceId: z.string().min(1),
+      name: z.string().optional(),
+      sourceType: z.enum(['pptx', 'notebooklm-doc', 'notebooklm-audio', 'notes']).optional(),
+    }),
+    z.object({
+      kind: z.literal('source-slide'),
+      sourceId: z.string().min(1),
+      slideIndex: z.number().int().min(1),
+      title: z.string().optional(),
+    }),
+    z.object({
+      kind: z.literal('character'),
+      characterId: z.string().min(1),
+      name: z.string().optional(),
+      voiceId: z.string().optional(),
+    }),
+    z.object({
+      kind: z.literal('voice'),
+      voiceId: z.string().min(1),
+      name: z.string().optional(),
+      sampleUrl: z.string().optional(),
+      playbackMode: z.enum(['auto', 'speak-script', 'direct-sample']).optional(),
+    }),
+    z.object({
+      kind: z.literal('music-preset'),
+      title: z.string().min(1),
+      mood: z.string().min(1),
+      bpm: z.number().min(50).max(200),
+      volumeDb: z.number().min(-40).max(0),
+      accentColor: z.string().optional(),
+    }),
+  ]),
 });
 
 const RagRetrieveSchema = z.object({
@@ -509,6 +621,9 @@ export function createApiRouter(
         assets: allAssets,
         preferredAssetIds: parsed.data.assetIds,
         sources: selectedSources,
+        cinematicStyle: parsed.data.cinematicStyle,
+        animationPreset: parsed.data.animationPreset,
+        musicPreset: parsed.data.musicPreset,
       });
 
       // Auto-generate native prompt-exact SVG visuals for scenes
@@ -526,6 +641,7 @@ export function createApiRouter(
             title: sc.title,
             keyPoints: sc.keyPoints,
             style: sc.cinematicStyle,
+            diagramType: parsed.data.diagramType || 'auto',
             uploadsRootDir: store.getUploadsDir(),
             assetLibrary,
           });
@@ -571,6 +687,205 @@ export function createApiRouter(
     }
   });
 
+  // Scene reorder (must come before :sceneId param route)
+  router.patch('/projects/:id/scenes/reorder', async (req, res, next) => {
+    try {
+      const parsed = ReorderScenesSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid scene reorder payload.', details: parsed.error.flatten() });
+        return;
+      }
+
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+
+      const byId = new Map(project.scenes.map((s) => [s.id, s]));
+      const ordered: typeof project.scenes = [];
+      const seen = new Set<string>();
+      for (const id of parsed.data.sceneIds) {
+        const sc = byId.get(id);
+        if (sc && !seen.has(id)) {
+          ordered.push(sc);
+          seen.add(id);
+        }
+      }
+      for (const sc of project.scenes) {
+        if (!seen.has(sc.id)) ordered.push(sc);
+      }
+
+      ordered.forEach((sc, idx) => {
+        sc.order = idx;
+      });
+      project.scenes = ordered;
+
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: parsed.data.historySummary || 'Reorder timeline scenes',
+        summary: parsed.data.historySummary || `Reordered ${project.scenes.length} scenes on timeline`,
+        actions: ['Reordered scenes on timeline'],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+
+      const saved = await store.saveProject(project);
+      res.json({ project: saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Create/insert a scene directly
+  router.post('/projects/:id/scenes', async (req, res, next) => {
+    try {
+      const parsed = CreateSceneSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid scene payload.', details: parsed.error.flatten() });
+        return;
+      }
+
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+
+      const allAssets = await assetLibrary.listAssets();
+      const attachedAssets = (parsed.data.assetIds || [])
+        .map((id) => allAssets.find((a) => a.id === id))
+        .filter((a): a is NonNullable<typeof a> => Boolean(a));
+
+      const defaultTitle =
+        parsed.data.title ||
+        attachedAssets[0]?.name ||
+        `Scene ${project.scenes.length + 1}`;
+      const durationSec = parsed.data.durationSec ?? 25;
+      const chapterId =
+        project.chapters[project.chapters.length - 1]?.id ||
+        `chap-${crypto.randomUUID().slice(0, 6)}`;
+
+      const newScene = {
+        id: `scene-${project.scenes.length + 1}-${crypto.randomUUID().slice(0, 6)}`,
+        chapterId,
+        order: project.scenes.length,
+        title: defaultTitle,
+        durationSec,
+        narration:
+          parsed.data.narration ||
+          `Walking through ${defaultTitle} and how it fits into ${project.topic}.`,
+        visualPrompt:
+          parsed.data.visualPrompt ||
+          `Visual diagram and scene showcasing ${defaultTitle} for ${project.topic}.`,
+        visualOverlay: 'architecture-flow' as const,
+        animationPreset: 'diagram-flow' as const,
+        generatedVisualUrl:
+          parsed.data.generatedVisualUrl ||
+          (attachedAssets[0]?.sourceType === 'photos' ? attachedAssets[0].mediaUrls[0] : undefined),
+        sourceId: parsed.data.sourceId,
+        sourceSlideIndex: parsed.data.sourceSlideIndex,
+        cameraMotion: 'Slow Dolly In' as const,
+        cinematicStyle: project.scenes[0]?.cinematicStyle || ('Neon Lab' as const),
+        transitionIn: 'Cross Dissolve' as const,
+        characterId: parsed.data.characterId || project.characters[0]?.id,
+        characterPlacement: 'left' as const,
+        voiceId: parsed.data.voiceId || project.primaryVoiceId,
+        voiceStatus: 'fallback' as const,
+        voiceEnabled: true,
+        higgsfield: {
+          status: 'fallback' as const,
+          provider: 'canvas-fallback' as const,
+          renderNote: 'Live 60fps canvas ready.',
+          updatedAt: new Date().toISOString(),
+        },
+        assetIds: attachedAssets.map((a) => a.id),
+        ragContext: attachedAssets.map((a) => ({
+          sourceType: 'asset' as const,
+          id: a.id,
+          name: a.name,
+          category: a.category,
+          score: 10,
+          matchedTerms: ['timeline-drop'],
+          snippet: a.technicalSpecs || a.description,
+          mediaUrl: a.mediaUrls[0],
+          mediaType: (a.sourceType === 'video' ? 'video' : 'image') as 'image' | 'video',
+        })),
+        keyPoints: [defaultTitle],
+      };
+
+      const insertIdx =
+        parsed.data.insertAtIndex !== undefined
+          ? Math.max(0, Math.min(project.scenes.length, parsed.data.insertAtIndex))
+          : project.scenes.length;
+      project.scenes.splice(insertIdx, 0, newScene);
+      project.scenes.forEach((sc, idx) => {
+        sc.order = idx;
+      });
+
+      const totalSec = project.scenes.reduce((acc, sc) => acc + sc.durationSec, 0);
+      project.targetDurationMinutes = Math.max(1, Math.min(30, Math.round(totalSec / 60)));
+
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Add timeline scene "${newScene.title}"`,
+        summary: `Added scene "${newScene.title}" (${durationSec}s) to timeline`,
+        actions: [`Added scene ${newScene.title}`],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+
+      const saved = await store.saveProject(project);
+      res.status(201).json({ project: saved, scene: newScene });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Delete a scene from timeline
+  router.delete('/projects/:id/scenes/:sceneId', async (req, res, next) => {
+    try {
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      if (project.scenes.length <= 1) {
+        res.status(400).json({ error: 'Cannot delete the only remaining scene in a project.' });
+        return;
+      }
+      const idx = project.scenes.findIndex((s) => s.id === req.params.sceneId);
+      if (idx === -1) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+      const [removed] = project.scenes.splice(idx, 1);
+      project.scenes.forEach((sc, i) => {
+        sc.order = i;
+      });
+
+      const totalSec = project.scenes.reduce((acc, sc) => acc + sc.durationSec, 0);
+      project.targetDurationMinutes = Math.max(1, Math.min(30, Math.round(totalSec / 60)));
+
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Delete scene "${removed.title}"`,
+        summary: `Deleted scene "${removed.title}" from timeline`,
+        actions: [`Deleted scene ${removed.title}`],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+
+      const saved = await store.saveProject(project);
+      res.json({ project: saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Scene direct update
   router.patch('/projects/:id/scenes/:sceneId', async (req, res, next) => {
     try {
@@ -595,6 +910,7 @@ export function createApiRouter(
       const updates = parsed.data;
       if (updates.title !== undefined) scene.title = updates.title;
       if (updates.durationSec !== undefined) scene.durationSec = updates.durationSec;
+      if (updates.trimStartSec !== undefined) scene.trimStartSec = updates.trimStartSec;
       if (updates.narration !== undefined) scene.narration = updates.narration;
       if (updates.visualPrompt !== undefined) scene.visualPrompt = updates.visualPrompt;
       if (updates.visualOverlay !== undefined) scene.visualOverlay = updates.visualOverlay;
@@ -605,14 +921,40 @@ export function createApiRouter(
       if (updates.cameraMotion !== undefined) scene.cameraMotion = updates.cameraMotion;
       if (updates.cinematicStyle !== undefined) scene.cinematicStyle = updates.cinematicStyle;
       if (updates.transitionIn !== undefined) scene.transitionIn = updates.transitionIn;
-      if (updates.characterId !== undefined) scene.characterId = updates.characterId || undefined;
+      if (updates.characterId !== undefined) {
+        scene.characterId = updates.characterId || undefined;
+        if (!updates.characterId) {
+          scene.characterStartSec = undefined;
+          scene.characterDurationSec = undefined;
+        }
+      }
       if (updates.characterPlacement !== undefined) scene.characterPlacement = updates.characterPlacement;
+      if (updates.characterStartSec !== undefined) {
+        scene.characterStartSec = updates.characterStartSec === null ? undefined : updates.characterStartSec;
+      }
+      if (updates.characterDurationSec !== undefined) {
+        scene.characterDurationSec =
+          updates.characterDurationSec === null ? undefined : updates.characterDurationSec;
+      }
       if (updates.voiceId !== undefined) scene.voiceId = updates.voiceId;
       if (updates.voicePlaybackMode !== undefined) {
         scene.voicePlaybackMode = updates.voicePlaybackMode;
       }
       if (updates.voiceAudioUrl !== undefined) {
         scene.voiceAudioUrl = updates.voiceAudioUrl || undefined;
+      }
+      if (updates.voiceStartSec !== undefined) {
+        scene.voiceStartSec = updates.voiceStartSec === null ? undefined : updates.voiceStartSec;
+      }
+      if (updates.voiceDurationSec !== undefined) {
+        scene.voiceDurationSec =
+          updates.voiceDurationSec === null ? undefined : updates.voiceDurationSec;
+      }
+      if (updates.voiceTrimStartSec !== undefined) {
+        scene.voiceTrimStartSec = updates.voiceTrimStartSec;
+      }
+      if (updates.voiceEnabled !== undefined) {
+        scene.voiceEnabled = updates.voiceEnabled;
       }
       if (updates.keyPoints !== undefined) {
         scene.keyPoints = updates.keyPoints;
@@ -809,6 +1151,50 @@ export function createApiRouter(
     }
   });
 
+  router.patch('/projects/:id/music/:trackId', async (req, res, next) => {
+    try {
+      const parsed = UpdateMusicSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid music track update.', details: parsed.error.flatten() });
+        return;
+      }
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const track = project.musicTracks.find((m) => m.id === req.params.trackId);
+      if (!track) {
+        res.status(404).json({ error: 'Music track not found.' });
+        return;
+      }
+      const updates = parsed.data;
+      if (updates.title !== undefined) track.title = updates.title;
+      if (updates.mood !== undefined) track.mood = updates.mood;
+      if (updates.bpm !== undefined) track.bpm = updates.bpm;
+      if (updates.startTimeSec !== undefined) track.startTimeSec = updates.startTimeSec;
+      if (updates.durationSec !== undefined) track.durationSec = updates.durationSec;
+      if (updates.volumeDb !== undefined) track.volumeDb = updates.volumeDb;
+      if (updates.duckUnderVoice !== undefined) track.duckUnderVoice = updates.duckUnderVoice;
+      if (updates.accentColor !== undefined) track.accentColor = updates.accentColor;
+
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Update music track "${track.title}"`,
+        summary: `Updated "${track.title}" (${track.startTimeSec}s, ${track.durationSec}s)`,
+        actions: [`Updated music track "${track.title}"`],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, track });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.delete('/projects/:id/music/:trackId', async (req, res, next) => {
     try {
       const project = await store.getProject(req.params.id);
@@ -816,9 +1202,317 @@ export function createApiRouter(
         res.status(404).json({ error: 'Project not found.' });
         return;
       }
+      const removed = project.musicTracks.find((m) => m.id === req.params.trackId);
+      if (!removed) {
+        res.status(404).json({ error: 'Music track not found.' });
+        return;
+      }
       project.musicTracks = project.musicTracks.filter((m) => m.id !== req.params.trackId);
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Delete music track "${removed.title}"`,
+        summary: `Removed music bed "${removed.title}" from timeline`,
+        actions: [`Deleted music track "${removed.title}"`],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
       const saved = await store.saveProject(project);
       res.json({ project: saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Unified timeline drag-and-drop attach/create handler
+  router.post('/projects/:id/timeline/drop', async (req, res, next) => {
+    try {
+      const parsed = TimelineDropSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid timeline drop payload.', details: parsed.error.flatten() });
+        return;
+      }
+
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+
+      const { track, dropSec, targetSceneId, payload } = parsed.data;
+      const totalSec = project.scenes.reduce((s, sc) => s + sc.durationSec, 0);
+
+      const resolveSceneAtSec = (sec: number) => {
+        if (targetSceneId) {
+          const explicit = project.scenes.find((s) => s.id === targetSceneId);
+          if (explicit) return explicit;
+        }
+        let cursor = 0;
+        for (const sc of project.scenes) {
+          if (sec >= cursor && sec < cursor + sc.durationSec) {
+            return sc;
+          }
+          cursor += sc.durationSec;
+        }
+        return project.scenes[project.scenes.length - 1] || project.scenes[0];
+      };
+
+      let actionSummary = '';
+
+      if (payload.kind === 'music-preset') {
+        const startSec = Math.max(0, Math.round(dropSec));
+        const durationSec = Math.max(15, Math.min(180, Math.round((totalSec || 60) / 2)));
+        const newTrack = {
+          id: `music-${crypto.randomUUID().slice(0, 6)}`,
+          title: payload.title,
+          mood: payload.mood,
+          bpm: payload.bpm,
+          startTimeSec: startSec,
+          durationSec,
+          volumeDb: payload.volumeDb,
+          duckUnderVoice: true,
+          accentColor: payload.accentColor || '#10b981',
+        };
+        project.musicTracks.push(newTrack);
+        actionSummary = `Dropped music bed "${newTrack.title}" at ${startSec}s`;
+      } else if (payload.kind === 'character') {
+        const [allChars] = await Promise.all([store.listCharacters()]);
+        const charObj =
+          project.characters.find((c) => c.id === payload.characterId) ||
+          allChars.find((c) => c.id === payload.characterId);
+        if (!charObj) {
+          res.status(404).json({ error: 'Character not found.' });
+          return;
+        }
+        if (!project.characters.some((c) => c.id === charObj.id)) {
+          project.characters.push(charObj);
+        }
+        const targetScene = resolveSceneAtSec(dropSec);
+        if (!targetScene) {
+          res.status(400).json({ error: 'Project has no scenes.' });
+          return;
+        }
+        targetScene.characterId = charObj.id;
+        if (targetScene.characterPlacement === 'offscreen') {
+          targetScene.characterPlacement = 'left';
+        }
+        if (track === 'character') {
+          targetScene.characterStartSec = Math.max(0, Math.round(dropSec));
+          targetScene.characterDurationSec =
+            targetScene.characterDurationSec ?? targetScene.durationSec;
+        }
+        actionSummary = `Assigned character "${charObj.name}" at ${Math.round(dropSec)}s`;
+      } else if (payload.kind === 'voice') {
+        const targetScene = resolveSceneAtSec(dropSec);
+        if (!targetScene) {
+          res.status(400).json({ error: 'Project has no scenes.' });
+          return;
+        }
+        targetScene.voiceId = payload.voiceId;
+        targetScene.voiceEnabled = true;
+        if (payload.playbackMode === 'direct-sample' && payload.sampleUrl) {
+          targetScene.voicePlaybackMode = 'direct-sample';
+        }
+        if (track === 'voiceover') {
+          targetScene.voiceStartSec = Math.max(0, Math.round(dropSec));
+          targetScene.voiceDurationSec =
+            targetScene.voiceDurationSec ?? targetScene.durationSec;
+        }
+        actionSummary = `Dropped voice "${payload.name || payload.voiceId}" onto "${targetScene.title}"`;
+      } else if (payload.kind === 'asset') {
+        const allAssets = await assetLibrary.listAssets();
+        const asset = allAssets.find((a) => a.id === payload.assetId);
+        if (!asset) {
+          res.status(404).json({ error: 'Asset not found.' });
+          return;
+        }
+        const shouldCreateNewScene =
+          track === 'scene' && !targetSceneId && dropSec >= totalSec - 0.5;
+        if (shouldCreateNewScene || project.scenes.length === 0) {
+          const chapterId =
+            project.chapters[project.chapters.length - 1]?.id ||
+            `chap-${crypto.randomUUID().slice(0, 6)}`;
+          const newScene = {
+            id: `scene-${project.scenes.length + 1}-${crypto.randomUUID().slice(0, 6)}`,
+            chapterId,
+            order: project.scenes.length,
+            title: asset.name,
+            durationSec: 25,
+            narration: `Examining ${asset.name}: ${asset.technicalSpecs || asset.description}`,
+            visualPrompt: `${asset.name} technical visual — ${asset.description}`,
+            visualOverlay: 'architecture-flow' as const,
+            animationPreset: 'diagram-flow' as const,
+            generatedVisualUrl:
+              asset.sourceType === 'photos' && asset.mediaUrls[0] ? asset.mediaUrls[0] : undefined,
+            cameraMotion: 'Slow Dolly In' as const,
+            cinematicStyle: project.scenes[0]?.cinematicStyle || ('Neon Lab' as const),
+            transitionIn: 'Cross Dissolve' as const,
+            characterId: project.characters[0]?.id,
+            characterPlacement: 'left' as const,
+            voiceId: project.primaryVoiceId,
+            voiceStatus: 'fallback' as const,
+            voiceEnabled: true,
+            higgsfield: {
+              status: 'fallback' as const,
+              provider: 'canvas-fallback' as const,
+              renderNote: `Created from asset "${asset.name}".`,
+              updatedAt: new Date().toISOString(),
+            },
+            assetIds: [asset.id],
+            ragContext: [
+              {
+                sourceType: 'asset' as const,
+                id: asset.id,
+                name: asset.name,
+                category: asset.category,
+                score: 10,
+                matchedTerms: ['timeline-drop'],
+                snippet: asset.technicalSpecs || asset.description,
+                mediaUrl: asset.mediaUrls[0],
+                mediaType: (asset.sourceType === 'video' ? 'video' : 'image') as 'image' | 'video',
+              },
+            ],
+            keyPoints: [asset.name],
+          };
+          project.scenes.push(newScene);
+          actionSummary = `Created scene "${asset.name}" from dropped asset`;
+        } else {
+          const targetScene = resolveSceneAtSec(dropSec)!;
+          targetScene.assetIds = Array.from(new Set([asset.id, ...(targetScene.assetIds || [])]));
+          if (asset.sourceType === 'photos' && asset.mediaUrls[0] && asset.mediaUrls[0].endsWith('.svg')) {
+            targetScene.generatedVisualUrl = asset.mediaUrls[0];
+          }
+          const newEntry = {
+            sourceType: 'asset' as const,
+            id: asset.id,
+            name: asset.name,
+            category: asset.category,
+            score: 10,
+            matchedTerms: ['timeline-drop'],
+            snippet: asset.technicalSpecs || asset.description,
+            mediaUrl: asset.mediaUrls[0],
+            mediaType: (asset.sourceType === 'video' ? 'video' : 'image') as 'image' | 'video',
+          };
+          targetScene.ragContext = [
+            newEntry,
+            ...(targetScene.ragContext || []).filter((r) => r.id !== asset.id),
+          ];
+          actionSummary = `Attached asset "${asset.name}" to "${targetScene.title}"`;
+        }
+      } else if (payload.kind === 'source' || payload.kind === 'source-slide') {
+        const source = await sourceStore.getSource(payload.sourceId);
+        if (!source) {
+          res.status(404).json({ error: 'Source not found.' });
+          return;
+        }
+        if (source.audioUrl && (track === 'voiceover' || track === 'music')) {
+          if (track === 'music') {
+            project.musicTracks.push({
+              id: `music-${crypto.randomUUID().slice(0, 6)}`,
+              title: source.name,
+              mood: 'NotebookLM Audio Overview',
+              bpm: 105,
+              startTimeSec: Math.max(0, Math.round(dropSec)),
+              durationSec: Math.max(15, Math.round(source.audioDurationSec || 45)),
+              volumeDb: -12,
+              duckUnderVoice: true,
+              accentColor: '#06b6d4',
+            });
+            actionSummary = `Dropped audio overview "${source.name}" onto Music track`;
+          } else {
+            const targetScene = resolveSceneAtSec(dropSec);
+            if (targetScene) {
+              targetScene.voiceAudioUrl = source.audioUrl;
+              targetScene.voicePlaybackMode = 'direct-sample';
+              targetScene.voiceEnabled = true;
+              targetScene.voiceStartSec = Math.max(0, Math.round(dropSec));
+              actionSummary = `Attached NotebookLM audio "${source.name}" to "${targetScene.title}"`;
+            }
+          }
+        } else {
+          const slidesToInsert =
+            payload.kind === 'source-slide'
+              ? source.slides.filter((sl) => sl.index === payload.slideIndex)
+              : source.slides.slice(0, 4);
+          const effectiveSlides = slidesToInsert.length > 0 ? slidesToInsert : source.slides.slice(0, 1);
+          const chapterId =
+            project.chapters[project.chapters.length - 1]?.id ||
+            `chap-${crypto.randomUUID().slice(0, 6)}`;
+
+          // Insert after target scene or at end
+          let insertIdx = project.scenes.length;
+          if (targetSceneId) {
+            const idx = project.scenes.findIndex((s) => s.id === targetSceneId);
+            if (idx >= 0) insertIdx = idx + 1;
+          } else if (dropSec < totalSec) {
+            let cursor = 0;
+            for (let i = 0; i < project.scenes.length; i++) {
+              cursor += project.scenes[i].durationSec;
+              if (dropSec <= cursor) {
+                insertIdx = i + 1;
+                break;
+              }
+            }
+          }
+
+          const createdScenes = effectiveSlides.map((sl, offset) => ({
+            id: `scene-${project.scenes.length + offset + 1}-${crypto.randomUUID().slice(0, 6)}`,
+            chapterId,
+            order: insertIdx + offset,
+            title: sl.title || `${source.name} (${sl.index})`,
+            durationSec: 24,
+            narration:
+              sl.speakerNotes ||
+              (sl.bullets.length > 0 ? `${sl.title}: ${sl.bullets.join('; ')}.` : sl.rawText.slice(0, 260)) ||
+              `Covering ${sl.title} from ${source.name}.`,
+            visualPrompt: `${sl.title} (${source.name}) — ${sl.bullets.join(', ')}`,
+            visualOverlay: 'architecture-flow' as const,
+            animationPreset:
+              sl.imageUrls.length > 0 ? ('slide-deck-reveal' as const) : ('kinetic-cards' as const),
+            generatedVisualUrl: sl.imageUrls[0],
+            sourceId: source.id,
+            sourceSlideIndex: sl.index,
+            cameraMotion: 'Slow Dolly In' as const,
+            cinematicStyle: project.scenes[0]?.cinematicStyle || ('Neon Lab' as const),
+            transitionIn: 'Match Cut' as const,
+            characterId: project.characters[0]?.id,
+            characterPlacement: 'left' as const,
+            voiceId: project.primaryVoiceId,
+            voiceStatus: 'fallback' as const,
+            voiceEnabled: true,
+            higgsfield: {
+              status: 'fallback' as const,
+              provider: 'canvas-fallback' as const,
+              renderNote: `Created from source "${source.name}" slide ${sl.index}.`,
+              updatedAt: new Date().toISOString(),
+            },
+            assetIds: source.assetIds.slice(0, 2),
+            keyPoints: sl.bullets.length > 0 ? sl.bullets.slice(0, 3) : [sl.title],
+          }));
+
+          project.scenes.splice(insertIdx, 0, ...createdScenes);
+          project.scenes.forEach((sc, idx) => {
+            sc.order = idx;
+          });
+          actionSummary = `Inserted ${createdScenes.length} scene(s) from "${source.name}" onto timeline`;
+        }
+      }
+
+      const recomputedSec = project.scenes.reduce((acc, sc) => acc + sc.durationSec, 0);
+      project.targetDurationMinutes = Math.max(1, Math.min(30, Math.round(recomputedSec / 60)));
+
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Timeline Drop: ${actionSummary}`,
+        summary: actionSummary || 'Dropped item onto timeline',
+        actions: [actionSummary || 'Timeline drop'],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, summary: actionSummary });
     } catch (err) {
       next(err);
     }

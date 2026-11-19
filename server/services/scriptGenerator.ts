@@ -262,6 +262,15 @@ export function generateExplainerProject(params: {
   assets?: TechAsset[];
   preferredAssetIds?: string[];
   sources?: ImportedSource[];
+  cinematicStyle?: CinematicStyle;
+  animationPreset?: SceneAnimationPreset;
+  musicPreset?: {
+    title: string;
+    mood: string;
+    bpm: number;
+    volumeDb: number;
+    accentColor?: string;
+  };
 }): ExplainerProject {
   const sources = params.sources || [];
   const sourceSlides: Array<{ source: ImportedSource; slide: ImportedSourceSlide }> = [];
@@ -425,12 +434,14 @@ export function generateExplainerProject(params: {
         sceneIdx === 0 ? 'Cross Dissolve' : TRANSITIONS[sceneIdx % TRANSITIONS.length];
       const placement = PLACEMENTS[sceneIdx % PLACEMENTS.length];
       const overlay = inferVisualOverlay(`${item.title} ${item.narration}`, sceneIdx);
-      const cinematicStyle = STYLES[c % STYLES.length];
-      const animationPreset = inferAnimationPreset(
-        `${item.title} ${item.visualPrompt} ${item.keyPoints.join(' ')}`,
-        item.slideImageUrls.length > 0,
-        sceneIdx
-      );
+      const cinematicStyle = params.cinematicStyle || STYLES[c % STYLES.length];
+      const animationPreset =
+        params.animationPreset ||
+        inferAnimationPreset(
+          `${item.title} ${item.visualPrompt} ${item.keyPoints.join(' ')}`,
+          item.slideImageUrls.length > 0,
+          sceneIdx
+        );
 
       const ragMatches = retrieveRagContext({
         query: `${topic} ${item.title} ${item.narration}`,
@@ -500,30 +511,44 @@ export function generateExplainerProject(params: {
     });
   }
 
-  const musicTracks: MusicTrack[] = [
-    {
-      id: `music-${crypto.randomUUID().slice(0, 6)}`,
-      title: 'Silicon Horizon (Ambient Pulse)',
-      mood: 'Focused Tech Ambient',
-      bpm: 108,
-      startTimeSec: 0,
-      durationSec: Math.min(totalTargetSec, Math.ceil(totalTargetSec * 0.6)),
-      volumeDb: -16,
-      duckUnderVoice: true,
-      accentColor: '#10b981',
-    },
-    {
-      id: `music-${crypto.randomUUID().slice(0, 6)}`,
-      title: 'Telemetry Rising (Resolution)',
-      mood: 'Inspiring Synth',
-      bpm: 116,
-      startTimeSec: Math.ceil(totalTargetSec * 0.6),
-      durationSec: totalTargetSec - Math.ceil(totalTargetSec * 0.6),
-      volumeDb: -15,
-      duckUnderVoice: true,
-      accentColor: '#06b6d4',
-    },
-  ];
+  const musicTracks: MusicTrack[] = params.musicPreset
+    ? [
+        {
+          id: `music-${crypto.randomUUID().slice(0, 6)}`,
+          title: params.musicPreset.title,
+          mood: params.musicPreset.mood,
+          bpm: params.musicPreset.bpm,
+          startTimeSec: 0,
+          durationSec: totalTargetSec,
+          volumeDb: params.musicPreset.volumeDb,
+          duckUnderVoice: true,
+          accentColor: params.musicPreset.accentColor || '#10b981',
+        },
+      ]
+    : [
+        {
+          id: `music-${crypto.randomUUID().slice(0, 6)}`,
+          title: 'Silicon Horizon (Ambient Pulse)',
+          mood: 'Focused Tech Ambient',
+          bpm: 108,
+          startTimeSec: 0,
+          durationSec: Math.min(totalTargetSec, Math.ceil(totalTargetSec * 0.6)),
+          volumeDb: -16,
+          duckUnderVoice: true,
+          accentColor: '#10b981',
+        },
+        {
+          id: `music-${crypto.randomUUID().slice(0, 6)}`,
+          title: 'Telemetry Rising (Resolution)',
+          mood: 'Inspiring Synth',
+          bpm: 116,
+          startTimeSec: Math.ceil(totalTargetSec * 0.6),
+          durationSec: totalTargetSec - Math.ceil(totalTargetSec * 0.6),
+          volumeDb: -15,
+          duckUnderVoice: true,
+          accentColor: '#06b6d4',
+        },
+      ];
 
   const now = new Date().toISOString();
   const projectTitle = params.title?.trim() || `${topic} — ${durationMinutes}m Explainer`;
