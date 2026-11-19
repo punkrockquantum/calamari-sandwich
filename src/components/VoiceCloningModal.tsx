@@ -129,6 +129,39 @@ export function VoiceCloningModal({
       return;
     }
 
+    let fileToUpload = sampleFile;
+    if (sampleMode === 'record' && recording && mediaRecorderRef.current) {
+      const recorder = mediaRecorderRef.current;
+      if (recorder.state !== 'inactive') {
+        fileToUpload = await new Promise<File | null>((resolve) => {
+          const prevOnStop = recorder.onstop;
+          recorder.onstop = (ev) => {
+            if (typeof prevOnStop === 'function') {
+              prevOnStop.call(recorder, ev);
+            }
+            const mime = recorder.mimeType || 'audio/webm';
+            const blob = new Blob(chunksRef.current, { type: mime });
+            const ext = mime.includes('wav') ? 'wav' : mime.includes('ogg') ? 'ogg' : 'webm';
+            const recorded =
+              blob.size > 0
+                ? new File([blob], `mic-sample-${Date.now()}.${ext}`, { type: mime })
+                : null;
+            resolve(recorded);
+          };
+          stopRecording();
+        });
+      }
+    }
+
+    if (sampleMode === 'upload' && !fileToUpload) {
+      setError('Select an audio or video voice sample, or switch to Trait Synthesis.');
+      return;
+    }
+    if (sampleMode === 'record' && !fileToUpload) {
+      setError('Record a microphone voice sample first, or switch to Trait Synthesis.');
+      return;
+    }
+
     const fd = new FormData();
     fd.append('name', name.trim());
     if (description.trim()) fd.append('description', description.trim());
@@ -136,8 +169,8 @@ export function VoiceCloningModal({
     fd.append('pitch', pitch);
     fd.append('warmth', String(warmth));
     fd.append('cadence', cadence);
-    if (sampleMode !== 'traits' && sampleFile) {
-      fd.append('sample', sampleFile);
+    if (sampleMode !== 'traits' && fileToUpload) {
+      fd.append('sample', fileToUpload);
     }
 
     try {

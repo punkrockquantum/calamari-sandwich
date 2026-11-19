@@ -31,11 +31,18 @@ import {
   type SessionConnectorKeys,
 } from '@/lib/connectors/registry';
 import {
+  playAudioUrl,
   playVoiceBlobUrl,
   startAmbientBed,
   stopAllAudio,
   stopVoiceAudio,
+  unlockAudio,
 } from '@/lib/audioEngine';
+import {
+  exportCanvasWithAudioWebm,
+  sanitizeFilename,
+  triggerBlobDownload,
+} from '@/lib/mediaExport';
 import { AssetUploadModal } from '@/components/AssetUploadModal';
 import { CharacterCloningModal } from '@/components/CharacterCloningModal';
 import { ConnectorsWorkspace } from '@/components/ConnectorsWorkspace';
@@ -74,6 +81,7 @@ export function App() {
   const [testingId, setTestingId] = useState<ConnectorId | 'all' | null>(null);
 
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
+  const [seekEpoch, setSeekEpoch] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [activeVoiceSource, setActiveVoiceSource] = useState<
@@ -97,9 +105,24 @@ export function App() {
 
   const ambientStopRef = useRef<(() => void) | null>(null);
   const voiceCacheRef = useRef<
-    Map<string, { blobUrl: string; source: 'elevenlabs' | 'native' | 'mock' }>
+    Map<
+      string,
+      {
+        blobUrl: string;
+        blob: Blob;
+        contentType: string;
+        source: 'elevenlabs' | 'native' | 'mock';
+      }
+    >
   >(new Map());
   const lastSpokenSceneKeyRef = useRef<string | null>(null);
+
+  const clearVoiceCache = useCallback(() => {
+    for (const entry of voiceCacheRef.current.values()) {
+      URL.revokeObjectURL(entry.blobUrl);
+    }
+    voiceCacheRef.current.clear();
+  }, []);
 
   const refreshConnectorsAndVoices = useCallback(
     async (keys: SessionConnectorKeys, prefs: DemoFallbackPrefs) => {
@@ -115,6 +138,7 @@ export function App() {
     []
   );
 
+  // Load projects, characters, and assets once on mount
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -133,7 +157,6 @@ export function App() {
           setActiveProjectId(projRes.projects[0].id);
           setActiveSceneId(projRes.projects[0].scenes[0]?.id || '');
         }
-        await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
       } catch (err) {
         if (mounted) {
           setErrorBanner(
@@ -146,6 +169,15 @@ export function App() {
       mounted = false;
       stopAllAudio();
     };
+  }, []);
+
+  // Refresh connectors and voices whenever session keys or demo prefs change
+  useEffect(() => {
+    void refreshConnectorsAndVoices(sessionKeys, demoPrefs).catch((err) => {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Failed to load connectors and voices.'
+      );
+    });
   }, [refreshConnectorsAndVoices, sessionKeys, demoPrefs]);
 
   const activeProject = useMemo(
@@ -176,7 +208,19 @@ export function App() {
     }
   };
 
-  // Playback ticker
+  const currentTimeSecRef = useRef(currentTimeSec);
+  currentTimeSecRef.current = currentTimeSec;
+  const activeProjectRef = useRef(activeProject);
+  activeProjectRef.current = activeProject;
+  const sessionKeysRef = useRef(sessionKeys);
+  sessionKeysRef.current = sessionKeys;
+
+  const firstMusicTrack = activeProject?.musicTracks[0];
+  const firstMusicBpm = firstMusicTrack?.bpm ?? 0;
+  const firstMusicDb = firstMusicTrack?.volumeDb ?? -16;
+  const hasMusicTrack = Boolean(firstMusicTrack);
+
+  // Playback ticker (does not restart when scene metadata or voiceStatus updates)
   useEffect(() => {
     if (!isPlaying || totalDurationSec <= 0) {
       if (ambientStopRef.current) {
@@ -186,11 +230,8 @@ export function App() {
       return;
     }
 
-    if (!isMuted && activeProject?.musicTracks[0]) {
-      ambientStopRef.current = startAmbientBed(
-        activeProject.musicTracks[0].bpm,
-        activeProject.musicTracks[0].volumeDb
-      );
+    if (!isMuted && hasMusicTrack) {
+      ambientStopRef.current = startAmbientBed(firstMusicBpm, firstMusicDb);
     }
 
     const timer = window.setInterval(() => {
@@ -211,7 +252,7 @@ export function App() {
         ambientStopRef.current = null;
       }
     };
-  }, [isPlaying, isMuted, totalDurationSec, activeProject]);
+  }, [isPlaying, isMuted, totalDurationSec, hasMusicTrack, firstMusicBpm, firstMusicDb]);
 
   // Sync activeSceneId with playhead during playback
   useEffect(() => {
@@ -230,7 +271,7 @@ export function App() {
 
   // Synchronized ElevenLabs / Native Cloned / Demo voiceover playback during timeline playback
   useEffect(() => {
-    if (!isPlaying || isMuted || !activeProject || !activeScene) {
+    if (!isPlaying || isMuted || !activeProject?.id || !activeScene) {
       stopVoiceAudio();
       lastSpokenSceneKeyRef.current = null;
       if (!isPlaying || isMuted) {
@@ -239,21 +280,23 @@ export function App() {
       return;
     }
 
-    const spokenKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}`;
+    const spokenKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}:${seekEpoch}`;
     if (lastSpokenSceneKeyRef.current === spokenKey) {
       return;
     }
     lastSpokenSceneKeyRef.current = spokenKey;
 
+    const proj = activeProjectRef.current;
     let sceneStartSec = 0;
-    for (const sc of activeProject.scenes) {
+    for (const sc of proj?.scenes || []) {
       if (sc.id === activeScene.id) break;
       sceneStartSec += sc.durationSec;
     }
-    const localOffsetSec = Math.max(0, currentTimeSec - sceneStartSec);
+    const localOffsetSec = Math.max(0, currentTimeSecRef.current - sceneStartSec);
+    const cacheKey = `${activeScene.id}:${activeScene.voiceId}:${activeScene.narration}`;
     let cancelled = false;
 
-    const cached = voiceCacheRef.current.get(spokenKey);
+    const cached = voiceCacheRef.current.get(cacheKey);
     if (cached) {
       setActiveVoiceSource(cached.source);
       void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec);
@@ -271,24 +314,35 @@ export function App() {
             projectId: activeProject.id,
             sceneId: activeScene.id,
           },
-          sessionKeys
+          sessionKeysRef.current
         );
-        if (cancelled) return;
+        if (cancelled) {
+          URL.revokeObjectURL(res.blobUrl);
+          return;
+        }
         const normalizedSource =
           res.source === 'elevenlabs'
             ? 'elevenlabs'
             : res.source === 'native'
               ? 'native'
               : 'mock';
-        voiceCacheRef.current.set(spokenKey, {
+        voiceCacheRef.current.set(cacheKey, {
           blobUrl: res.blobUrl,
+          blob: res.blob,
+          contentType: res.contentType,
           source: normalizedSource,
         });
         setActiveVoiceSource(normalizedSource);
-        await playVoiceBlobUrl(res.blobUrl, 0.9, localOffsetSec);
-      } catch {
+        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, localOffsetSec);
+        if (!playback.ok && playback.error && !cancelled) {
+          setErrorBanner(`Audio playback blocked: ${playback.error}`);
+        }
+      } catch (err) {
         if (!cancelled) {
           setActiveVoiceSource(null);
+          setErrorBanner(
+            err instanceof Error ? err.message : 'Voiceover synthesis failed during playback.'
+          );
         }
       }
     })();
@@ -296,7 +350,15 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [isPlaying, isMuted, activeProject, activeScene, currentTimeSec, sessionKeys]);
+  }, [
+    isPlaying,
+    isMuted,
+    activeProject?.id,
+    activeScene?.id,
+    activeScene?.voiceId,
+    activeScene?.narration,
+    seekEpoch,
+  ]);
 
   // Poll queued / generating Higgsfield and Gemini Veo jobs until ready or failed
   const pendingProviderJobs = useMemo(() => {
@@ -440,6 +502,9 @@ export function App() {
     try {
       const { project } = await studioApi.updateScene(activeProject.id, sceneId, patch);
       upsertProject(project);
+      if (patch.voiceId !== undefined || patch.narration !== undefined) {
+        lastSpokenSceneKeyRef.current = null;
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Scene update failed.');
     }
@@ -497,7 +562,12 @@ export function App() {
     sceneId?: string
   ) => {
     if (!activeProject) return;
+    unlockAudio();
+    if (isMuted) {
+      setIsMuted(false);
+    }
     setBusyAction('tts');
+    setErrorBanner(null);
     try {
       const res = await studioApi.synthesizeSpeech(
         {
@@ -508,17 +578,25 @@ export function App() {
         },
         sessionKeys
       );
-      if (!isMuted) {
-        await playVoiceBlobUrl(res.blobUrl);
+      const normalizedSource =
+        res.source === 'elevenlabs'
+          ? 'elevenlabs'
+          : res.source === 'native'
+            ? 'native'
+            : 'mock';
+      setActiveVoiceSource(normalizedSource);
+      const playback = await playVoiceBlobUrl(res.blobUrl);
+      if (!playback.ok && playback.error) {
+        setErrorBanner(`Audio playback failed: ${playback.error}`);
       }
       if (sceneId) {
-        const refreshed = await studioApi.listProjects();
-        setProjects(refreshed.projects);
+        const refreshed = await studioApi.getProject(activeProject.id);
+        upsertProject(refreshed.project);
       }
       setLastActionSummary(
-        res.source === 'elevenlabs'
+        normalizedSource === 'elevenlabs'
           ? 'Synthesized ElevenLabs voiceover'
-          : res.source === 'native'
+          : normalizedSource === 'native'
             ? 'Synthesized native cloned voiceover'
             : 'Played studio fallback voiceover'
       );
@@ -529,10 +607,130 @@ export function App() {
     }
   };
 
+  const handlePlaySampleUrl = async (url: string, label: string) => {
+    unlockAudio();
+    if (isMuted) {
+      setIsMuted(false);
+    }
+    setErrorBanner(null);
+    const playback = await playAudioUrl(url);
+    if (!playback.ok && playback.error) {
+      setErrorBanner(`Could not play sample for "${label}": ${playback.error}`);
+    } else {
+      setLastActionSummary(`Playing recorded/uploaded sample for "${label}"`);
+    }
+  };
+
+  const handleDeleteVoice = async (voiceId: string) => {
+    setBusyAction(`delete-voice-${voiceId}`);
+    setErrorBanner(null);
+    try {
+      await studioApi.deleteVoice(voiceId);
+      clearVoiceCache();
+      await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      if (activeProject) {
+        const fallbackVoiceId =
+          voices.find((v) => v.voice_id !== voiceId)?.voice_id || 'mock-rachel';
+        let latest = activeProject;
+        for (const sc of activeProject.scenes) {
+          if (sc.voiceId === voiceId) {
+            const res = await studioApi.updateScene(activeProject.id, sc.id, {
+              voiceId: fallbackVoiceId,
+            });
+            latest = res.project;
+          }
+        }
+        upsertProject(latest);
+      }
+      setLastActionSummary('Deleted custom cloned voice');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to delete voice.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDownloadSceneAudio = async (scene: SceneItem) => {
+    if (!activeProject) return;
+    setBusyAction('tts');
+    setErrorBanner(null);
+    try {
+      const res = await studioApi.synthesizeSpeech(
+        {
+          voiceId: scene.voiceId,
+          text: scene.narration,
+          projectId: activeProject.id,
+          sceneId: scene.id,
+        },
+        sessionKeys
+      );
+      const ext = res.contentType.includes('mpeg') || res.contentType.includes('mp3') ? 'mp3' : 'wav';
+      triggerBlobDownload(res.blob, `${sanitizeFilename(scene.title)}-voiceover.${ext}`);
+      URL.revokeObjectURL(res.blobUrl);
+      setLastActionSummary(`Downloaded voiceover audio (${ext.toUpperCase()}) for "${scene.title}"`);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Audio download failed.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleExportSceneVideo = async (params: {
+    canvas: HTMLCanvasElement | null;
+    scene: SceneItem;
+    stageVideoUrl: string | null;
+  }) => {
+    if (!activeProject) return;
+    setBusyAction('export-video');
+    setErrorBanner(null);
+    try {
+      if (params.stageVideoUrl) {
+        const resp = await fetch(params.stageVideoUrl);
+        if (!resp.ok) {
+          throw new Error(`Failed to fetch stage video (HTTP ${resp.status})`);
+        }
+        const videoBlob = await resp.blob();
+        const ext = videoBlob.type.includes('webm') ? 'webm' : 'mp4';
+        triggerBlobDownload(videoBlob, `${sanitizeFilename(params.scene.title)}.${ext}`);
+        setLastActionSummary(`Downloaded stage video for "${params.scene.title}"`);
+        return;
+      }
+
+      if (!params.canvas) {
+        throw new Error('Stage canvas is not ready for export.');
+      }
+
+      const speech = await studioApi.synthesizeSpeech(
+        {
+          voiceId: params.scene.voiceId,
+          text: params.scene.narration,
+          projectId: activeProject.id,
+          sceneId: params.scene.id,
+        },
+        sessionKeys
+      );
+      URL.revokeObjectURL(speech.blobUrl);
+
+      const webmBlob = await exportCanvasWithAudioWebm({
+        canvas: params.canvas,
+        voiceBlob: speech.blob,
+        durationSec: params.scene.durationSec,
+      });
+      triggerBlobDownload(webmBlob, `${sanitizeFilename(params.scene.title)}.webm`);
+      setLastActionSummary(`Exported "${params.scene.title}" video + voiceover (.webm)`);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Video export failed.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleCloneVoice = async (formData: FormData) => {
     setBusyAction('clone-voice');
     try {
       const { voice } = await studioApi.cloneVoice(formData);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
       await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
       if (activeProject && activeScene) {
         const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
@@ -540,7 +738,7 @@ export function App() {
         });
         upsertProject(updated.project);
       }
-      setLastActionSummary(`Cloned native voice "${voice.name}"`);
+      setLastActionSummary(`Cloned native voice "${voice.name}" and assigned to active scene`);
     } finally {
       setBusyAction(null);
     }
@@ -678,7 +876,7 @@ export function App() {
           });
           upsertProject(updated.project);
         }
-        voiceCacheRef.current.clear();
+        clearVoiceCache();
       }
       setLastActionSummary(res.result.message);
     }
@@ -696,7 +894,7 @@ export function App() {
       return copy;
     });
     if (id === 'elevenlabs') {
-      voiceCacheRef.current.clear();
+      clearVoiceCache();
     }
     await refreshConnectorsAndVoices(nextKeys, demoPrefs);
     setLastActionSummary(`Disconnected ${id}`);
@@ -705,7 +903,7 @@ export function App() {
   const handleSyncElevenLabsVoices = async () => {
     setBusyAction('sync-voices');
     try {
-      voiceCacheRef.current.clear();
+      clearVoiceCache();
       const { voiceRes } = await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
       setLastActionSummary(
         voiceRes.source === 'mock'
@@ -729,7 +927,8 @@ export function App() {
         }
       }
       upsertProject(latestProject);
-      voiceCacheRef.current.clear();
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
       setLastActionSummary('Applied selected voice to all scenes');
     } finally {
       setBusyAction(null);
@@ -828,14 +1027,20 @@ export function App() {
                 project={activeProject}
                 assets={assets}
                 currentTimeSec={currentTimeSec}
+                seekEpoch={seekEpoch}
                 isPlaying={isPlaying}
                 isMuted={isMuted}
                 activeSceneId={activeScene?.id || ''}
                 activeVoiceSource={activeVoiceSource}
-                onTogglePlay={() => setIsPlaying((p) => !p)}
+                exportingVideo={busyAction === 'export-video'}
+                onTogglePlay={() => {
+                  unlockAudio();
+                  setIsPlaying((p) => !p);
+                }}
                 onToggleMute={() => setIsMuted((m) => !m)}
                 onSeek={(sec) => {
                   lastSpokenSceneKeyRef.current = null;
+                  setSeekEpoch((e) => e + 1);
                   setCurrentTimeSec(sec);
                 }}
                 onSelectScene={(id) => setActiveSceneId(id)}
@@ -848,6 +1053,8 @@ export function App() {
                     );
                   }
                 }}
+                onDownloadSceneAudio={(sc) => void handleDownloadSceneAudio(sc)}
+                onExportSceneVideo={(params) => void handleExportSceneVideo(params)}
               />
 
               <DirectorPromptBar
@@ -872,6 +1079,9 @@ export function App() {
               onTriggerHiggsfield={handleTriggerHiggsfield}
               onPushSceneToProvider={handlePushSceneToProvider}
               onPreviewVoice={handlePreviewVoice}
+              onDownloadSceneAudio={handleDownloadSceneAudio}
+              onPlaySampleUrl={handlePlaySampleUrl}
+              onDeleteVoice={handleDeleteVoice}
               onPushVoiceToElevenLabs={handlePushVoiceToElevenLabs}
               onSyncElevenLabsVoices={handleSyncElevenLabsVoices}
               onAssignVoiceToAllScenes={handleAssignVoiceToAllScenes}
@@ -892,16 +1102,24 @@ export function App() {
             currentTimeSec={currentTimeSec}
             activeSceneId={activeScene?.id || ''}
             onSelectScene={(sceneId, startSec) => {
+              lastSpokenSceneKeyRef.current = null;
+              setSeekEpoch((e) => e + 1);
               setActiveSceneId(sceneId);
               setCurrentTimeSec(startSec);
             }}
-            onSeek={(sec) => setCurrentTimeSec(sec)}
+            onSeek={(sec) => {
+              lastSpokenSceneKeyRef.current = null;
+              setSeekEpoch((e) => e + 1);
+              setCurrentTimeSec(sec);
+            }}
           />
         </main>
       )}
 
       <TopicGeneratorModal
         open={showNewModal}
+        voices={voices}
+        activeVoiceId={activeScene?.voiceId}
         onClose={() => setShowNewModal(false)}
         onGenerate={handleGenerateProject}
         busy={busyAction === 'generate'}

@@ -5,18 +5,91 @@ import type { VoiceProfile, VoiceTraits } from '../../shared/types.js';
 
 export const ALLOWED_VOICE_AUDIO_MIMES = new Set([
   'audio/wav',
+  'audio/wave',
   'audio/x-wav',
+  'audio/vnd.wave',
   'audio/mpeg',
   'audio/mp3',
   'audio/webm',
   'audio/ogg',
+  'audio/opus',
   'audio/mp4',
+  'audio/m4a',
   'audio/aac',
+  'audio/x-aac',
   'audio/x-m4a',
+  'audio/flac',
+  'audio/x-flac',
+  'audio/3gpp',
   'video/mp4',
   'video/webm',
   'video/quicktime',
 ]);
+
+const VOICE_EXTENSION_MIME_MAP: Record<string, string> = {
+  '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.webm': 'audio/webm',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/opus',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+};
+
+export function normalizeMimeType(mimetype?: string): string {
+  return (mimetype || '').split(';')[0].trim().toLowerCase();
+}
+
+export function resolveVoiceSampleMimeType(mimetype?: string, filename?: string): string | null {
+  const normalized = normalizeMimeType(mimetype);
+  if (ALLOWED_VOICE_AUDIO_MIMES.has(normalized)) {
+    return normalized;
+  }
+  if (!normalized || normalized === 'application/octet-stream') {
+    const ext = path.extname(filename || '').toLowerCase();
+    return VOICE_EXTENSION_MIME_MAP[ext] || null;
+  }
+  return null;
+}
+
+export function inferVoiceExtension(mimetype?: string, filename?: string): string {
+  const rawExt = path.extname(filename || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+  if (rawExt && VOICE_EXTENSION_MIME_MAP[rawExt]) {
+    return rawExt;
+  }
+  const normalized = normalizeMimeType(mimetype);
+  switch (normalized) {
+    case 'audio/mpeg':
+    case 'audio/mp3':
+      return '.mp3';
+    case 'audio/webm':
+      return '.webm';
+    case 'audio/ogg':
+    case 'audio/opus':
+      return '.ogg';
+    case 'audio/mp4':
+    case 'audio/m4a':
+    case 'audio/x-m4a':
+      return '.m4a';
+    case 'audio/aac':
+    case 'audio/x-aac':
+      return '.aac';
+    case 'audio/flac':
+    case 'audio/x-flac':
+      return '.flac';
+    case 'video/mp4':
+      return '.mp4';
+    case 'video/webm':
+      return '.webm';
+    case 'video/quicktime':
+      return '.mov';
+    default:
+      return '.wav';
+  }
+}
 
 interface VoiceStoreFile {
   voices: VoiceProfile[];

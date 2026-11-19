@@ -14,6 +14,23 @@ export const ALLOWED_VIDEO_MIME_TYPES = new Set([
   'video/quicktime',
 ]);
 
+export function normalizeMediaMimeType(mimetype?: string, filename?: string): string {
+  const base = (mimetype || '').split(';')[0].trim().toLowerCase();
+  if (ALLOWED_IMAGE_MIME_TYPES.has(base) || ALLOWED_VIDEO_MIME_TYPES.has(base)) {
+    return base;
+  }
+  if (!base || base === 'application/octet-stream') {
+    const ext = (filename || '').split('.').pop()?.toLowerCase();
+    if (ext === 'png') return 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'webp') return 'image/webp';
+    if (ext === 'mp4') return 'video/mp4';
+    if (ext === 'webm') return 'video/webm';
+    if (ext === 'mov') return 'video/quicktime';
+  }
+  return base;
+}
+
 export const MAX_PHOTOS = 5;
 export const MAX_VIDEOS = 1;
 export const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB per file
@@ -133,9 +150,14 @@ export function validateCharacterUpload(
     }
   }
 
-  const imageFiles = files.filter((f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype));
-  const videoFiles = files.filter((f) => ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype));
-  const unsupported = files.filter(
+  const normalizedFiles = files.map((f) => ({
+    ...f,
+    mimetype: normalizeMediaMimeType(f.mimetype, f.originalname),
+  }));
+
+  const imageFiles = normalizedFiles.filter((f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype));
+  const videoFiles = normalizedFiles.filter((f) => ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype));
+  const unsupported = normalizedFiles.filter(
     (f) => !ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && !ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype)
   );
 

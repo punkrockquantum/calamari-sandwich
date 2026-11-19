@@ -288,7 +288,6 @@ export async function generateGeminiVeoScene(params: {
       aspectRatio: '16:9',
       durationSeconds: Math.min(8, Math.max(5, Math.round(params.scene.durationSec))),
       personGeneration: 'allow_adult',
-      referenceAssetUrls: attachedMediaUrls,
     },
   };
 

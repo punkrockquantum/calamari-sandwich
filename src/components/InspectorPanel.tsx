@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Database,
+  Download,
   Film,
   Loader2,
   LogIn,
@@ -57,6 +58,9 @@ interface InspectorPanelProps {
     characterId?: string
   ) => Promise<void>;
   onPreviewVoice: (voiceId: string, sampleText?: string, sceneId?: string) => Promise<void>;
+  onDownloadSceneAudio: (scene: SceneItem) => Promise<void>;
+  onPlaySampleUrl: (url: string, label: string) => Promise<void>;
+  onDeleteVoice: (voiceId: string) => Promise<void>;
   onPushVoiceToElevenLabs: (voiceId: string) => Promise<void>;
   onSyncElevenLabsVoices: () => Promise<void>;
   onAssignVoiceToAllScenes: (voiceId: string) => Promise<void>;
@@ -124,6 +128,9 @@ export function InspectorPanel({
   onTriggerHiggsfield,
   onPushSceneToProvider,
   onPreviewVoice,
+  onDownloadSceneAudio,
+  onPlaySampleUrl,
+  onDeleteVoice,
   onPushVoiceToElevenLabs,
   onSyncElevenLabsVoices,
   onAssignVoiceToAllScenes,
@@ -443,6 +450,56 @@ export function InspectorPanel({
               </div>
             </div>
 
+            {/* Voiceover Selector directly in Scene Tab */}
+            <div className="rounded-xl border border-amber-500/25 bg-amber-950/10 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[11px] font-medium text-amber-200 flex items-center gap-1.5">
+                  <Mic className="w-3 h-3 text-amber-400" />
+                  Scene Narrator Voice
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onAssignVoiceToAllScenes(activeScene.voiceId)}
+                    className="text-[10px] text-amber-300 hover:underline"
+                    title="Apply this voice to every scene in the project"
+                  >
+                    Apply to All Scenes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenVoiceClone}
+                    className="text-[10px] text-cyan-300 hover:underline"
+                  >
+                    + Clone Voice
+                  </button>
+                </div>
+              </div>
+              <select
+                aria-label="Scene Narrator Voice"
+                value={activeScene.voiceId}
+                onChange={(e) =>
+                  void onUpdateScene(activeScene.id, { voiceId: e.target.value })
+                }
+                className="w-full bg-zinc-950 border border-zinc-800 focus:border-amber-500 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none"
+              >
+                {!voices.some((v) => v.voice_id === activeScene.voiceId) && (
+                  <option value={activeScene.voiceId}>{activeScene.voiceId}</option>
+                )}
+                {voices.map((v) => (
+                  <option key={v.voice_id} value={v.voice_id}>
+                    {v.name} (
+                    {v.source === 'native'
+                      ? 'Native Clone'
+                      : v.source === 'elevenlabs'
+                        ? 'ElevenLabs'
+                        : 'Studio'}
+                    )
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Push to Provider + Native Voiceover */}
             <div className="pt-1 flex flex-col gap-2">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
@@ -479,21 +536,32 @@ export function InspectorPanel({
                 Push to Provider: Gemini Veo
               </button>
 
-              <button
-                type="button"
-                disabled={busyAction === 'tts'}
-                onClick={() =>
-                  void onPreviewVoice(activeScene.voiceId, activeScene.narration, activeScene.id)
-                }
-                className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 py-2 text-xs font-medium text-amber-200 transition"
-              >
-                {busyAction === 'tts' ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Volume2 className="w-3.5 h-3.5" />
-                )}
-                Synthesize &amp; Preview Voiceover
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busyAction === 'tts'}
+                  onClick={() =>
+                    void onPreviewVoice(activeScene.voiceId, activeScene.narration, activeScene.id)
+                  }
+                  className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 py-2 text-xs font-medium text-amber-200 transition disabled:opacity-60"
+                >
+                  {busyAction === 'tts' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  )}
+                  Synthesize &amp; Preview Voiceover
+                </button>
+                <button
+                  type="button"
+                  disabled={busyAction === 'tts'}
+                  onClick={() => void onDownloadSceneAudio(activeScene)}
+                  title="Download Synthesized Voiceover Audio"
+                  className="inline-flex items-center justify-center gap-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 px-2.5 py-2 text-xs font-medium text-zinc-200 transition disabled:opacity-60"
+                >
+                  <Download className="w-3.5 h-3.5 text-amber-300" />
+                </button>
+              </div>
 
               {/* Job Status Box */}
               {activePushJob && (
@@ -608,7 +676,10 @@ export function InspectorPanel({
                         <button
                           type="button"
                           onClick={() =>
-                            void onUpdateScene(activeScene.id, { characterId: char.id })
+                            void onUpdateScene(activeScene.id, {
+                              characterId: char.id,
+                              ...(char.voiceId ? { voiceId: char.voiceId } : {}),
+                            })
                           }
                           className="w-full rounded-lg border border-zinc-800 hover:border-cyan-500/50 bg-zinc-900/90 py-1.5 text-[11px] font-medium text-zinc-200 flex items-center justify-center gap-1"
                         >
@@ -686,14 +757,27 @@ export function InspectorPanel({
                   Clone voices directly with <strong>+ Add Voice</strong> above, or connect
                   ElevenLabs to import library voices &amp; push custom voices to your account.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => onOpenConnectModal('elevenlabs')}
-                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-semibold py-1.5 text-xs transition"
-                >
-                  <LogIn className="w-3.5 h-3.5" />
-                  Connect ElevenLabs
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onOpenConnectModal('elevenlabs')}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-semibold py-1.5 text-xs transition"
+                  >
+                    <LogIn className="w-3.5 h-3.5" />
+                    Connect ElevenLabs
+                  </button>
+                  {activeScene && (
+                    <button
+                      type="button"
+                      disabled={busyAction === 'assign-voices'}
+                      onClick={() => void onAssignVoiceToAllScenes(activeScene.voiceId)}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition"
+                      title="Apply active scene voice to all scenes"
+                    >
+                      Apply All
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-2.5 space-y-2">
@@ -837,7 +921,7 @@ export function InspectorPanel({
                     </div>
 
                     {isNative && (
-                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-800/70">
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-800/70 flex-wrap">
                         <span className="text-[10px] text-zinc-400">
                           {v.elevenlabsVoiceId
                             ? `Synced: ${v.elevenlabsVoiceId}`
@@ -845,19 +929,40 @@ export function InspectorPanel({
                               ? 'Sample saved on server'
                               : 'Trait-synthesized'}
                         </span>
-                        <button
-                          type="button"
-                          disabled={busyAction === `push-voice-${v.voice_id}`}
-                          onClick={() => void onPushVoiceToElevenLabs(v.voice_id)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2 py-1 text-[10px] font-medium text-amber-200 transition"
-                        >
-                          {busyAction === `push-voice-${v.voice_id}` ? (
-                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                          ) : (
-                            <Send className="w-2.5 h-2.5" />
+                        <div className="flex items-center gap-1.5">
+                          {v.sampleUrl && (
+                            <button
+                              type="button"
+                              onClick={() => void onPlaySampleUrl(v.sampleUrl!, v.name)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[10px] font-medium text-zinc-200 transition"
+                              title="Play uploaded/recorded sample"
+                            >
+                              <Volume2 className="w-2.5 h-2.5 text-cyan-300" />
+                              Sample
+                            </button>
                           )}
-                          {v.pushStatus === 'pushed' ? 'Re-push to ElevenLabs' : 'Push to ElevenLabs'}
-                        </button>
+                          <button
+                            type="button"
+                            disabled={busyAction === `push-voice-${v.voice_id}`}
+                            onClick={() => void onPushVoiceToElevenLabs(v.voice_id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2 py-1 text-[10px] font-medium text-amber-200 transition"
+                          >
+                            {busyAction === `push-voice-${v.voice_id}` ? (
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                            ) : (
+                              <Send className="w-2.5 h-2.5" />
+                            )}
+                            {v.pushStatus === 'pushed' ? 'Re-push' : 'Push to ElevenLabs'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteVoice(v.voice_id)}
+                            title="Delete Custom Voice"
+                            className="p-1 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-900 transition"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>

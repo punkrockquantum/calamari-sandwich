@@ -40,6 +40,12 @@ export function CharacterCloningModal({
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (open && voices.length > 0 && !voices.some((v) => v.voice_id === voiceId)) {
+      setVoiceId(voices[0].voice_id);
+    }
+  }, [open, voices, voiceId]);
+
+  useEffect(() => {
     const urls = files.map((f) => URL.createObjectURL(f));
     setPreviewUrls(urls);
     return () => {
@@ -121,6 +127,7 @@ export function CharacterCloningModal({
   };
 
   const handleQuickPreset = async (preset: CharacterProfile) => {
+    setValidationError(null);
     const fd = new FormData();
     fd.append('name', `${preset.name} Clone`);
     fd.append('role', preset.role);
@@ -128,8 +135,12 @@ export function CharacterCloningModal({
     fd.append('stylePreset', preset.stylePreset);
     fd.append('voiceId', preset.voiceId || voiceId);
     fd.append('projectId', projectId);
-    await onCloneSubmit(fd);
-    onClose();
+    try {
+      await onCloneSubmit(fd);
+      onClose();
+    } catch (err) {
+      setValidationError(err instanceof Error ? err.message : 'Failed to clone preset.');
+    }
   };
 
   return (

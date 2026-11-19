@@ -1,9 +1,11 @@
-import { useState } from 'react';
-import { Clock, Loader2, Sparkles, X } from 'lucide-react';
-import type { AudienceLevel, GenerateProjectRequest } from '@shared/types';
+import { useEffect, useState } from 'react';
+import { Clock, Loader2, Mic, Sparkles, X } from 'lucide-react';
+import type { AudienceLevel, GenerateProjectRequest, VoiceProfile } from '@shared/types';
 
 interface TopicGeneratorModalProps {
   open: boolean;
+  voices: VoiceProfile[];
+  activeVoiceId?: string;
   onClose: () => void;
   onGenerate: (payload: GenerateProjectRequest) => Promise<void>;
   busy: boolean;
@@ -20,6 +22,8 @@ const SAMPLE_TOPICS = [
 
 export function TopicGeneratorModal({
   open,
+  voices,
+  activeVoiceId,
   onClose,
   onGenerate,
   busy,
@@ -27,6 +31,18 @@ export function TopicGeneratorModal({
   const [topic, setTopic] = useState(SAMPLE_TOPICS[0]);
   const [durationMinutes, setDurationMinutes] = useState(10);
   const [audience, setAudience] = useState<AudienceLevel>('engineering');
+  const [primaryVoiceId, setPrimaryVoiceId] = useState(
+    activeVoiceId || voices[0]?.voice_id || 'mock-rachel'
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    if (activeVoiceId && voices.some((v) => v.voice_id === activeVoiceId)) {
+      setPrimaryVoiceId(activeVoiceId);
+    } else if (voices.length > 0 && !voices.some((v) => v.voice_id === primaryVoiceId)) {
+      setPrimaryVoiceId(voices[0].voice_id);
+    }
+  }, [open, activeVoiceId, voices, primaryVoiceId]);
 
   if (!open) return null;
 
@@ -46,7 +62,12 @@ export function TopicGeneratorModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!topic.trim() || busy) return;
-    await onGenerate({ topic: topic.trim(), durationMinutes, audience });
+    await onGenerate({
+      topic: topic.trim(),
+      durationMinutes,
+      audience,
+      primaryVoiceId,
+    });
     onClose();
   };
 
@@ -160,6 +181,25 @@ export function TopicGeneratorModal({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
+              <Mic className="w-3.5 h-3.5 text-amber-400" />
+              Narrator Voice (Cloned &amp; Studio)
+            </label>
+            <select
+              aria-label="Narrator Voice"
+              value={primaryVoiceId}
+              onChange={(e) => setPrimaryVoiceId(e.target.value)}
+              className="w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-indigo-500 px-3 py-2 text-xs text-zinc-100 focus:outline-none"
+            >
+              {voices.map((v) => (
+                <option key={v.voice_id} value={v.voice_id}>
+                  {v.name} ({v.source === 'native' ? 'Native Clone' : v.source === 'elevenlabs' ? 'ElevenLabs' : 'Studio'})
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="pt-2 flex items-center justify-end gap-2">

@@ -11,6 +11,7 @@ import type {
   SceneItem,
   TechAsset,
   TransitionType,
+  VoiceProfile,
 } from '../../shared/types.js';
 import { buildClonedCharacter } from './characterService.js';
 import { retrieveRagContext } from './ragContext.js';
@@ -99,7 +100,8 @@ function extractTargetSceneIndex(prompt: string, totalScenes: number): number | 
 export function applyDirectorPrompt(
   project: ExplainerProject,
   rawPrompt: string,
-  assets: TechAsset[] = []
+  assets: TechAsset[] = [],
+  voices: VoiceProfile[] = []
 ): DirectorPromptResult {
   const prompt = rawPrompt.trim();
   if (!prompt) {
@@ -315,10 +317,68 @@ export function applyDirectorPrompt(
   };
   if (wantsVeoRender) {
     const id = resolveTargetId();
-    if (id) veoTargetSceneIds.push(id);
+    if (id) {
+      veoTargetSceneIds.push(id);
+      if (actions.length === 0) {
+        const target = next.scenes.find((s) => s.id === id);
+        actions.push(`Prepared Gemini Veo render for "${target?.title || 'scene'}"`);
+      }
+    }
   } else if (wantsHiggsfieldRender) {
     const id = resolveTargetId();
-    if (id) higgsfieldTargetSceneIds.push(id);
+    if (id) {
+      higgsfieldTargetSceneIds.push(id);
+      if (actions.length === 0) {
+        const target = next.scenes.find((s) => s.id === id);
+        actions.push(`Prepared Higgsfield render for "${target?.title || 'scene'}"`);
+      }
+    }
+  }
+
+  // Voice switching via Director Prompt (supports native cloned voices, ElevenLabs & studio voices)
+  if (
+    voices.length > 0 &&
+    /\b(voice|voiceover|narrator)\b/i.test(lower) &&
+    /\b(use|switch|change|set|apply|assign)\b/i.test(lower)
+  ) {
+    const quotedVoice = extractQuotedText(prompt)?.toLowerCase();
+    const matchedVoice =
+      (quotedVoice &&
+        voices.find(
+          (v) =>
+            v.name.toLowerCase().includes(quotedVoice) ||
+            v.voice_id.toLowerCase() === quotedVoice
+        )) ||
+      voices.find((v) => {
+        const shortName = v.name.split('—')[0].trim().toLowerCase();
+        return (
+          lower.includes(v.name.toLowerCase()) ||
+          (shortName.length >= 2 && lower.includes(shortName)) ||
+          lower.includes(v.voice_id.toLowerCase())
+        );
+      }) ||
+      (lower.includes('cloned') || lower.includes('native')
+        ? voices.find((v) => v.source === 'native')
+        : undefined);
+
+    if (matchedVoice) {
+      const applyAll = /\b(all|every|entire|project)\b/i.test(lower);
+      if (applyAll) {
+        next.primaryVoiceId = matchedVoice.voice_id;
+        next.scenes.forEach((sc) => {
+          sc.voiceId = matchedVoice.voice_id;
+        });
+        actions.push(`Assigned voice "${matchedVoice.name}" to all scenes`);
+      } else {
+        const scopeIdx = targetIdx !== undefined ? targetIdx : 0;
+        if (next.scenes[scopeIdx]) {
+          next.scenes[scopeIdx].voiceId = matchedVoice.voice_id;
+          actions.push(
+            `Assigned voice "${matchedVoice.name}" to Scene ${scopeIdx + 1}`
+          );
+        }
+      }
+    }
   }
 
   if (!isAddingScene && (cameraUpdate || styleUpdate || transitionUpdate || placementUpdate || targetIdx !== undefined)) {

@@ -33,7 +33,7 @@ export function DirectorPromptBar({
   };
 
   return (
-    <div className="bg-[#0d0d14] border border-indigo-500/30 rounded-xl p-3 shadow-lg shadow-indigo-950/20">
+    <div className="shrink-0 bg-[#0d0d14] border border-indigo-500/30 rounded-xl p-3 shadow-lg shadow-indigo-950/20">
       <form onSubmit={handleSubmit} className="flex items-center gap-2">
         <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center shrink-0">
           <Wand2 className="w-4 h-4 text-indigo-400" />

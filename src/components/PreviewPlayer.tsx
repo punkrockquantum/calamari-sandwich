@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Camera,
   ChevronLeft,
   ChevronRight,
+  Download,
   Film,
   Loader2,
   Pause,
   Play,
+  RotateCcw,
   Sparkles,
   Volume2,
   VolumeX,
@@ -20,20 +23,29 @@ import type {
   SceneItem,
   TechAsset,
 } from '@shared/types';
+import { studioApi } from '@/lib/api';
 
 interface PreviewPlayerProps {
   project: ExplainerProject;
   assets: TechAsset[];
   currentTimeSec: number;
+  seekEpoch?: number;
   isPlaying: boolean;
   isMuted: boolean;
   activeSceneId: string;
   activeVoiceSource?: 'elevenlabs' | 'native' | 'mock' | null;
+  exportingVideo?: boolean;
   onTogglePlay: () => void;
   onToggleMute: () => void;
   onSeek: (sec: number) => void;
   onSelectScene: (sceneId: string) => void;
   onSpeakActiveScene: () => void;
+  onDownloadSceneAudio?: (scene: SceneItem) => void;
+  onExportSceneVideo?: (params: {
+    canvas: HTMLCanvasElement | null;
+    scene: SceneItem;
+    stageVideoUrl: string | null;
+  }) => void;
 }
 
 interface StylePalette {
@@ -105,21 +117,28 @@ export function PreviewPlayer({
   project,
   assets,
   currentTimeSec,
+  seekEpoch = 0,
   isPlaying,
   isMuted,
   activeSceneId,
   activeVoiceSource,
+  exportingVideo = false,
   onTogglePlay,
   onToggleMute,
   onSeek,
   onSelectScene,
   onSpeakActiveScene,
+  onDownloadSceneAudio,
+  onExportSceneVideo,
 }: PreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const animTimeRef = useRef<number>(0);
-  const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
+  const currentTimeSecRef = useRef<number>(currentTimeSec);
+  currentTimeSecRef.current = currentTimeSec;
+  const [failedVideoUrls, setFailedVideoUrls] = useState<string[]>([]);
+  const [proxiedVideoKeys, setProxiedVideoKeys] = useState<string[]>([]);
 
   const sceneOffsets = useMemo(() => {
     let acc = 0;
@@ -159,21 +178,54 @@ export function PreviewPlayer({
   }, [activeScene, assets]);
 
   const activeExternalJob = pickActiveExternalJob(activeScene);
-  const externalVideoUrl =
+  const rawExternalVideoUrl =
     activeExternalJob &&
     activeExternalJob.provider !== 'canvas-fallback' &&
     activeExternalJob.status === 'ready' &&
-    activeExternalJob.videoUrl &&
-    activeExternalJob.videoUrl !== failedVideoUrl
+    activeExternalJob.videoUrl
       ? activeExternalJob.videoUrl
       : null;
 
+  const externalJobKey =
+    activeScene && activeExternalJob
+      ? `${activeScene.id}:${activeExternalJob.provider}:${activeExternalJob.updatedAt}`
+      : '';
+
+  const needsProxy =
+    Boolean(rawExternalVideoUrl) &&
+    (rawExternalVideoUrl!.includes('googleapis.com') ||
+      proxiedVideoKeys.includes(externalJobKey));
+
+  const resolvedExternalVideoUrl =
+    rawExternalVideoUrl && activeScene && activeExternalJob && activeExternalJob.provider !== 'canvas-fallback'
+      ? needsProxy
+        ? studioApi.getProviderVideoProxyUrl(
+            project.id,
+            activeScene.id,
+            activeExternalJob.provider
+          )
+        : rawExternalVideoUrl
+      : null;
+
+  const externalVideoUrl =
+    resolvedExternalVideoUrl && !failedVideoUrls.includes(resolvedExternalVideoUrl)
+      ? resolvedExternalVideoUrl
+      : null;
+
   const ragVideoAsset = sceneAssets.find(
-    (a) => a.sourceType === 'video' && a.mediaUrls[0] && a.mediaUrls[0] !== failedVideoUrl
+    (a) => a.sourceType === 'video' && a.mediaUrls[0] && !failedVideoUrls.includes(a.mediaUrls[0])
   );
   const ragPhotoAsset = sceneAssets.find((a) => a.sourceType === 'photos' && a.mediaUrls[0]);
 
   const stageVideoUrl = externalVideoUrl || ragVideoAsset?.mediaUrls[0] || null;
+  const stageVideoFailed =
+    Boolean(resolvedExternalVideoUrl && failedVideoUrls.includes(resolvedExternalVideoUrl)) ||
+    Boolean(
+      !resolvedExternalVideoUrl &&
+        sceneAssets.some(
+          (a) => a.sourceType === 'video' && a.mediaUrls[0] && failedVideoUrls.includes(a.mediaUrls[0])
+        )
+    );
   const stageVideoLabel = externalVideoUrl
     ? activeExternalJob?.provider === 'gemini_veo'
       ? 'Gemini Veo Video'
@@ -182,25 +234,17 @@ export function PreviewPlayer({
       ? `RAG Clip: ${ragVideoAsset.name}`
       : null;
 
-  // Sync <video> element with timeline playback & seek
+  // Reset failed flags when active job updates
+  useEffect(() => {
+    if (!externalJobKey) return;
+    setFailedVideoUrls([]);
+  }, [externalJobKey]);
+
+  // Sync <video> element play/pause with timeline without hammering play() every 100ms
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !stageVideoUrl || !activeEntry) return;
-
+    if (!video || !stageVideoUrl) return;
     video.muted = isMuted;
-    const localTime = Math.max(0, currentTimeSec - activeEntry.startSec);
-    if (
-      Number.isFinite(video.duration) &&
-      video.duration > 0 &&
-      Math.abs(video.currentTime - (localTime % video.duration)) > 0.8
-    ) {
-      try {
-        video.currentTime = localTime % video.duration;
-      } catch {
-        // Ignore seek errors before metadata loads
-      }
-    }
-
     if (isPlaying) {
       void video.play().catch(() => {
         // Ignore browser autoplay restrictions
@@ -208,7 +252,21 @@ export function PreviewPlayer({
     } else {
       video.pause();
     }
-  }, [stageVideoUrl, isPlaying, isMuted, activeEntry, currentTimeSec]);
+  }, [stageVideoUrl, isPlaying, isMuted, activeScene?.id]);
+
+  // Sync <video> element time only on seek, scene change, or significant drift
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !stageVideoUrl || !activeEntry) return;
+    const localTime = Math.max(0, currentTimeSecRef.current - activeEntry.startSec);
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      try {
+        video.currentTime = localTime % video.duration;
+      } catch {
+        // Ignore seek errors before metadata loads
+      }
+    }
+  }, [stageVideoUrl, activeEntry?.scene.id, seekEpoch]);
 
   // Preload uploaded character & RAG asset images for canvas rendering
   useEffect(() => {
@@ -242,7 +300,7 @@ export function PreviewPlayer({
         if (ctx) {
           const w = canvas.width;
           const h = canvas.height;
-          const localElapsed = Math.max(0, currentTimeSec - activeEntry.startSec);
+          const localElapsed = Math.max(0, currentTimeSecRef.current - activeEntry.startSec);
           const progress = Math.min(1, localElapsed / Math.max(1, activeScene.durationSec));
           const t = animTimeRef.current;
           const palette = STYLE_PALETTES[activeScene.cinematicStyle] || STYLE_PALETTES['Neon Lab'];
@@ -596,7 +654,7 @@ export function PreviewPlayer({
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, currentTimeSec, isPlaying]);
+  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, isPlaying]);
 
   const activeIndex = sceneOffsets.findIndex((e) => e.scene.id === activeScene?.id);
 
@@ -613,7 +671,7 @@ export function PreviewPlayer({
     activeExternalJob?.status === 'queued' || activeExternalJob?.status === 'generating';
 
   return (
-    <div className="flex flex-col bg-[#0d0d14] border border-zinc-800/90 rounded-xl overflow-hidden shadow-2xl">
+    <div className="shrink-0 flex flex-col bg-[#0d0d14] border border-zinc-800/90 rounded-xl overflow-hidden shadow-2xl">
       {/* Stage Header */}
       <div className="px-3.5 py-2 border-b border-zinc-800/80 flex items-center justify-between gap-2 bg-zinc-950/60">
         <div className="flex items-center gap-2 min-w-0">
@@ -674,7 +732,7 @@ export function PreviewPlayer({
 
       {/* 16:9 Stage */}
       <div className="relative bg-[#06060a] py-2 px-3 flex items-center justify-center">
-        <div className="relative w-full max-w-[540px] aspect-video rounded-lg overflow-hidden border border-zinc-800/70 shadow-lg bg-black">
+        <div className="relative w-full max-w-[460px] aspect-video rounded-lg overflow-hidden border border-zinc-800/70 shadow-lg bg-black">
           <canvas
             ref={canvasRef}
             width={960}
@@ -689,8 +747,22 @@ export function PreviewPlayer({
                 src={stageVideoUrl}
                 playsInline
                 loop
+                controls
                 muted={isMuted}
-                onError={() => setFailedVideoUrl(stageVideoUrl)}
+                onError={() => {
+                  if (
+                    rawExternalVideoUrl &&
+                    !needsProxy &&
+                    externalJobKey &&
+                    !proxiedVideoKeys.includes(externalJobKey)
+                  ) {
+                    setProxiedVideoKeys((prev) => [...prev, externalJobKey]);
+                  } else {
+                    setFailedVideoUrls((prev) =>
+                      prev.includes(stageVideoUrl) ? prev : [...prev, stageVideoUrl]
+                    );
+                  }
+                }}
                 className="w-full h-full object-cover block"
               />
               <div className="pointer-events-none absolute top-2.5 left-2.5 rounded-md bg-black/70 border border-white/10 px-2 py-1 text-[10px] font-medium text-cyan-300">
@@ -769,7 +841,57 @@ export function PreviewPlayer({
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            {stageVideoFailed && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFailedVideoUrls([]);
+                  setProxiedVideoKeys([]);
+                }}
+                className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-500/20"
+                title="External video failed to load; fell back to Canvas Stage. Click to retry."
+              >
+                <AlertCircle className="w-3 h-3" />
+                Retry Video
+                <RotateCcw className="w-2.5 h-2.5" />
+              </button>
+            )}
+            {activeScene && onDownloadSceneAudio && (
+              <button
+                type="button"
+                onClick={() => onDownloadSceneAudio(activeScene)}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 transition"
+                title="Download synthesized voiceover audio for this scene"
+              >
+                <Download className="w-3 h-3 text-amber-400" />
+                <span className="hidden sm:inline">Audio</span>
+              </button>
+            )}
+            {activeScene && onExportSceneVideo && (
+              <button
+                type="button"
+                disabled={exportingVideo}
+                onClick={() =>
+                  onExportSceneVideo({
+                    canvas: canvasRef.current,
+                    scene: activeScene,
+                    stageVideoUrl,
+                  })
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 disabled:opacity-50 px-2 py-1 text-[11px] text-cyan-200 transition"
+                title="Export rendered scene video with voiceover"
+              >
+                {exportingVideo ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Download className="w-3 h-3" />
+                )}
+                <span className="hidden sm:inline">
+                  {exportingVideo ? 'Exporting...' : 'Export Video'}
+                </span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onToggleMute}
