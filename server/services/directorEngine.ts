@@ -279,6 +279,19 @@ export function applyDirectorPrompt(
   const transitionUpdate = matchTransition(prompt);
   const placementUpdate = matchPlacement(prompt);
   const isAddingScene = actions.some((a) => a.startsWith('Added Scene'));
+  const wantsHiggsfieldRender = /\b(higgsfield|render|generate.*video|generate.*cinematic|cinematic render)\b/i.test(
+    lower
+  );
+  const higgsfieldTargetSceneIds: string[] = [];
+  if (wantsHiggsfieldRender) {
+    if (isAddingScene && next.scenes.length > 0) {
+      higgsfieldTargetSceneIds.push(next.scenes[next.scenes.length - 1].id);
+    } else if (targetIdx !== undefined && next.scenes[targetIdx]) {
+      higgsfieldTargetSceneIds.push(next.scenes[targetIdx].id);
+    } else if (next.scenes[0]) {
+      higgsfieldTargetSceneIds.push(next.scenes[0].id);
+    }
+  }
 
   if (!isAddingScene && (cameraUpdate || styleUpdate || transitionUpdate || placementUpdate || targetIdx !== undefined)) {
     const targets = targetIdx !== undefined ? [next.scenes[targetIdx]] : next.scenes;
@@ -376,6 +389,7 @@ export function applyDirectorPrompt(
     project: next,
     summary,
     actions,
+    higgsfieldTargetSceneIds,
   };
 }
 

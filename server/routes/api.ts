@@ -29,14 +29,18 @@ import {
 } from '../services/elevenlabs.js';
 import {
   generateHiggsfieldScene,
+  pollHiggsfieldJobStatus,
   resolveHiggsfieldKey,
 } from '../services/higgsfield.js';
 import {
+  connectConnector,
+  disconnectConnector,
   getConnectorDefinition,
   listConnectors,
   testConnectorConnection,
 } from '../connectors/registry.js';
 import { generateExplainerProject } from '../services/scriptGenerator.js';
+import type { CredentialVault } from '../store/credentialVault.js';
 import type { ProjectStore } from '../store/projectStore.js';
 
 const GenerateProjectSchema = z.object({
@@ -97,15 +101,26 @@ const AddMusicSchema = z.object({
   accentColor: z.string().max(20).optional(),
 });
 
+const ConnectConnectorSchema = z.object({
+  apiKey: z.string().trim().min(1, 'API key or Key ID is required').max(512),
+  apiSecret: z.string().trim().max(512).optional(),
+  endpoint: z.string().trim().max(512).optional(),
+  model: z.string().trim().max(160).optional(),
+});
+
 function getHeaderKey(req: Request, name: string): string | undefined {
   const val = req.header(name);
   return typeof val === 'string' && val.trim().length > 0 ? val.trim() : undefined;
 }
 
-function buildConnectorContext(req: Request) {
+function buildConnectorContext(req: Request, vault?: CredentialVault) {
   const headers: Record<string, string | undefined> = {
     'x-elevenlabs-key': getHeaderKey(req, 'x-elevenlabs-key'),
+    'x-elevenlabs-endpoint': getHeaderKey(req, 'x-elevenlabs-endpoint'),
     'x-higgsfield-key': getHeaderKey(req, 'x-higgsfield-key'),
+    'x-higgsfield-secret': getHeaderKey(req, 'x-higgsfield-secret'),
+    'x-higgsfield-endpoint': getHeaderKey(req, 'x-higgsfield-endpoint'),
+    'x-higgsfield-model': getHeaderKey(req, 'x-higgsfield-model'),
     'x-character-clone-key': getHeaderKey(req, 'x-character-clone-key'),
     'x-director-llm-key': getHeaderKey(req, 'x-director-llm-key'),
     'x-music-key': getHeaderKey(req, 'x-music-key'),
@@ -117,10 +132,10 @@ function buildConnectorContext(req: Request) {
       .map((s) => s.trim())
       .filter(Boolean)
   );
-  return { headers, demoDisabledIds };
+  return { headers, demoDisabledIds, vault };
 }
 
-export function createApiRouter(store: ProjectStore): express.Router {
+export function createApiRouter(store: ProjectStore, vault?: CredentialVault): express.Router {
   const router = express.Router();
 
   const upload = multer({
@@ -160,8 +175,12 @@ export function createApiRouter(store: ProjectStore): express.Router {
   });
 
   router.get('/providers/status', (req, res) => {
-    const el = resolveElevenLabsKey(getHeaderKey(req, 'x-elevenlabs-key'));
-    const hf = resolveHiggsfieldKey(getHeaderKey(req, 'x-higgsfield-key'));
+    const el = resolveElevenLabsKey(getHeaderKey(req, 'x-elevenlabs-key'), vault);
+    const hf = resolveHiggsfieldKey(getHeaderKey(req, 'x-higgsfield-key'), vault, {
+      sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+      sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+      sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+    });
     const status: ProviderStatus = {
       elevenlabs: {
         configured: Boolean(el.key),
@@ -177,7 +196,7 @@ export function createApiRouter(store: ProjectStore): express.Router {
 
   // Dedicated 5-slot API Connectors Registry
   router.get('/connectors', (req, res) => {
-    const connectors = listConnectors(buildConnectorContext(req));
+    const connectors = listConnectors(buildConnectorContext(req, vault));
     res.json({ connectors });
   });
 
@@ -188,8 +207,54 @@ export function createApiRouter(store: ProjectStore): express.Router {
         res.status(404).json({ error: `Unknown connector "${req.params.id}".` });
         return;
       }
-      const result = await testConnectorConnection(def.id, buildConnectorContext(req));
+      const result = await testConnectorConnection(def.id, buildConnectorContext(req, vault));
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/connectors/:id/connect', async (req, res, next) => {
+    try {
+      const def = getConnectorDefinition(req.params.id);
+      if (!def) {
+        res.status(404).json({ error: `Unknown connector "${req.params.id}".` });
+        return;
+      }
+      const parsed = ConnectConnectorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          ok: false,
+          error: parsed.error.issues[0]?.message || 'Invalid connector credentials.',
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const response = await connectConnector(
+        def.id,
+        parsed.data,
+        buildConnectorContext(req, vault)
+      );
+      if (!response.ok) {
+        res.status(400).json(response);
+        return;
+      }
+      res.json(response);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/connectors/:id/disconnect', async (req, res, next) => {
+    try {
+      const def = getConnectorDefinition(req.params.id);
+      if (!def) {
+        res.status(404).json({ error: `Unknown connector "${req.params.id}".` });
+        return;
+      }
+      const connector = await disconnectConnector(def.id, buildConnectorContext(req, vault));
+      res.json({ ok: true, connector });
     } catch (err) {
       next(err);
     }
@@ -382,11 +447,42 @@ export function createApiRouter(store: ProjectStore): express.Router {
       }
 
       const result = applyDirectorPrompt(project, parsed.data.prompt);
+
+      if (result.higgsfieldTargetSceneIds && result.higgsfieldTargetSceneIds.length > 0) {
+        const hfKey = resolveHiggsfieldKey(getHeaderKey(req, 'x-higgsfield-key'), vault, {
+          sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+          sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+          sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+        });
+        if (hfKey.key) {
+          for (const targetSceneId of result.higgsfieldTargetSceneIds) {
+            const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
+            if (!targetScene) continue;
+            const char = result.project.characters.find((c) => c.id === targetScene.characterId);
+            const jobState = await generateHiggsfieldScene({
+              scene: targetScene,
+              character: char,
+              sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+              sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+              sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+              sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+              vault,
+            });
+            targetScene.higgsfield = jobState;
+            result.actions.push(
+              `Submitted Higgsfield render (${jobState.status}) for "${targetScene.title}"`
+            );
+          }
+          result.summary = result.actions.join('; ');
+        }
+      }
+
       const saved = await store.saveProject(result.project);
       res.json({
         project: saved,
         summary: result.summary,
         actions: result.actions,
+        higgsfieldTargetSceneIds: result.higgsfieldTargetSceneIds,
       });
     } catch (err) {
       next(err);
@@ -535,7 +631,7 @@ export function createApiRouter(store: ProjectStore): express.Router {
   // ElevenLabs Voice Import & TTS (/api/voices, /api/tts, plus /v1 mirror endpoints)
   const handleListVoices = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await listElevenLabsVoices(getHeaderKey(req, 'x-elevenlabs-key'));
+      const result = await listElevenLabsVoices(getHeaderKey(req, 'x-elevenlabs-key'), vault);
       res.json(result);
     } catch (err) {
       next(err);
@@ -562,6 +658,7 @@ export function createApiRouter(store: ProjectStore): express.Router {
         voiceId: parsed.data.voiceId,
         text: parsed.data.text,
         sessionHeaderKey: getHeaderKey(req, 'x-elevenlabs-key'),
+        vault,
       });
 
       if (parsed.data.projectId && parsed.data.sceneId) {
@@ -590,7 +687,7 @@ export function createApiRouter(store: ProjectStore): express.Router {
   router.post('/tts', handleTts);
   router.post('/v1/text-to-speech/:voiceId', handleTts);
 
-  // Higgsfield Cinematic Scene generation
+  // Higgsfield Cinematic Scene generation & job status polling
   router.post('/higgsfield/generate', async (req, res, next) => {
     try {
       const parsed = HiggsfieldSceneSchema.safeParse(req.body);
@@ -613,6 +710,40 @@ export function createApiRouter(store: ProjectStore): express.Router {
         scene,
         character,
         sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+        sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+        sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+        sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+        vault,
+      });
+
+      scene.higgsfield = jobState;
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, higgsfield: jobState });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/higgsfield/jobs/:projectId/:sceneId', async (req, res, next) => {
+    try {
+      const project = await store.getProject(req.params.projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const scene = project.scenes.find((s) => s.id === req.params.sceneId);
+      if (!scene) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+
+      const jobState = await pollHiggsfieldJobStatus({
+        scene,
+        sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+        sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+        sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+        sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+        vault,
       });
 
       scene.higgsfield = jobState;

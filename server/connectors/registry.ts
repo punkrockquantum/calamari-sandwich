@@ -1,15 +1,29 @@
 import type {
+  ConnectConnectorRequest,
+  ConnectConnectorResponse,
+  ConnectorAccountInfo,
   ConnectorDescriptor,
   ConnectorId,
   ConnectorKeySource,
   ConnectorStatusLevel,
   ConnectorTestResult,
 } from '../../shared/types.js';
-import { MOCK_VOICES } from '../services/elevenlabs.js';
+import {
+  DEFAULT_ELEVENLABS_ENDPOINT,
+  MOCK_VOICES,
+  verifyElevenLabsCredentials,
+} from '../services/elevenlabs.js';
+import {
+  DEFAULT_HIGGSFIELD_ENDPOINT,
+  DEFAULT_HIGGSFIELD_MODEL,
+  verifyHiggsfieldCredentials,
+} from '../services/higgsfield.js';
+import { maskCredential, type CredentialVault } from '../store/credentialVault.js';
 
 export interface ConnectorProbeResult {
   ok: boolean;
   message: string;
+  account?: ConnectorAccountInfo;
   details?: Record<string, string | number | boolean>;
 }
 
@@ -20,17 +34,31 @@ export interface ConnectorDefinition {
   description: string;
   envVar: string;
   fallbackEnvVars?: string[];
+  secretEnvVar?: string;
   sessionHeader: string;
+  sessionSecretHeader?: string;
+  sessionEndpointHeader?: string;
+  sessionModelHeader?: string;
   endpointEnvVar?: string;
   defaultEndpoint: string;
+  defaultModel?: string;
+  portalUrl?: string;
+  portalLabel?: string;
+  supportsKeySecret?: boolean;
   capabilities: string[];
-  testLive?: (apiKey: string, endpoint: string) => Promise<ConnectorProbeResult>;
+  testLive?: (params: {
+    apiKey: string;
+    apiSecret?: string;
+    endpoint: string;
+    model?: string;
+  }) => Promise<ConnectorProbeResult>;
   verifyDemo: () => ConnectorProbeResult;
 }
 
 export interface ConnectorRequestContext {
   headers: Record<string, string | undefined>;
   demoDisabledIds?: Set<string>;
+  vault?: CredentialVault;
 }
 
 const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
@@ -42,29 +70,13 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
       'Imports custom/library voices via /v1/voices and synthesizes scene narration via /v1/text-to-speech.',
     envVar: 'ELEVENLABS_API_KEY',
     sessionHeader: 'x-elevenlabs-key',
+    sessionEndpointHeader: 'x-elevenlabs-endpoint',
     endpointEnvVar: 'ELEVENLABS_API_URL',
-    defaultEndpoint: 'https://api.elevenlabs.io/v1',
+    defaultEndpoint: DEFAULT_ELEVENLABS_ENDPOINT,
+    portalUrl: 'https://elevenlabs.io/app/settings/api-keys',
+    portalLabel: 'Open ElevenLabs API Keys',
     capabilities: ['Voice Library Import', 'Multilingual v2 TTS', 'Procedural WAV Demo Fallback'],
-    testLive: async (apiKey, endpoint): Promise<ConnectorProbeResult> => {
-      const url = `${endpoint.replace(/\/$/, '')}/voices`;
-      const res = await fetch(url, {
-        headers: { 'xi-api-key': apiKey, Accept: 'application/json' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) {
-        return {
-          ok: false,
-          message: `ElevenLabs responded with HTTP ${res.status}. Verify API key permissions.`,
-          details: { httpStatus: res.status },
-        };
-      }
-      const data = (await res.json()) as { voices?: unknown[] };
-      return {
-        ok: true,
-        message: `Connected to ElevenLabs (${data.voices?.length ?? 0} voices accessible).`,
-        details: { voicesCount: data.voices?.length ?? 0 },
-      };
-    },
+    testLive: async ({ apiKey, endpoint }) => verifyElevenLabsCredentials(apiKey, endpoint),
     verifyDemo: () => ({
       ok: true,
       message: `Demo Mode active: ${MOCK_VOICES.length} studio voices & local WAV synthesis ready.`,
@@ -78,32 +90,20 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     description:
       'Generates 16:9 dynamic camera motion clips, character staging, and cinematic lighting passes.',
     envVar: 'HIGGSFIELD_API_KEY',
+    secretEnvVar: 'HIGGSFIELD_API_SECRET',
     sessionHeader: 'x-higgsfield-key',
+    sessionSecretHeader: 'x-higgsfield-secret',
+    sessionEndpointHeader: 'x-higgsfield-endpoint',
+    sessionModelHeader: 'x-higgsfield-model',
     endpointEnvVar: 'HIGGSFIELD_API_URL',
-    defaultEndpoint: 'https://platform.higgsfield.ai/v1',
+    defaultEndpoint: DEFAULT_HIGGSFIELD_ENDPOINT,
+    defaultModel: DEFAULT_HIGGSFIELD_MODEL,
+    portalUrl: 'https://cloud.higgsfield.ai/',
+    portalLabel: 'Open Higgsfield Cloud',
+    supportsKeySecret: true,
     capabilities: ['6 Camera Motion Presets', '5 Cinematic Styles', '60fps HTML5 Canvas Fallback'],
-    testLive: async (apiKey, endpoint) => {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'HEAD',
-          headers: { Authorization: `Bearer ${apiKey}`, 'hf-api-key': apiKey },
-          signal: AbortSignal.timeout(6000),
-        });
-        return {
-          ok: res.status < 500,
-          message:
-            res.status < 500
-              ? `Higgsfield endpoint reachable with configured key (HTTP ${res.status}).`
-              : `Higgsfield endpoint returned HTTP ${res.status}.`,
-          details: { httpStatus: res.status },
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          message: `Higgsfield endpoint unreachable (${err instanceof Error ? err.message : 'network error'}); canvas fallback stays ready.`,
-        };
-      }
-    },
+    testLive: async ({ apiKey, apiSecret, endpoint, model }) =>
+      verifyHiggsfieldCredentials({ apiKey, apiSecret, endpoint, model }),
     verifyDemo: () => ({
       ok: true,
       message: 'Demo Mode active: real-time 16:9 Canvas camera motion & diagram renderer ready.',
@@ -121,7 +121,7 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     endpointEnvVar: 'CHARACTER_CLONE_API_URL',
     defaultEndpoint: 'https://api.calamari-sandwich.local/v1/character-clone',
     capabilities: ['Max 5 Photos Validation', '1 Short Video Validation', 'Trait & Style Extraction'],
-    testLive: async (apiKey) => ({
+    testLive: async ({ apiKey }) => ({
       ok: apiKey.length >= 6,
       message:
         apiKey.length >= 6
@@ -147,7 +147,7 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     endpointEnvVar: 'DIRECTOR_LLM_API_URL',
     defaultEndpoint: 'https://api.openai.com/v1',
     capabilities: ['2–30m Chapter Pacing', 'Natural-Language Director Edits', 'Snapshot Undo/Redo'],
-    testLive: async (apiKey, endpoint) => {
+    testLive: async ({ apiKey, endpoint }) => {
       if (endpoint.includes('openai.com')) {
         try {
           const res = await fetch(`${endpoint.replace(/\/$/, '')}/models`, {
@@ -190,7 +190,7 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     endpointEnvVar: 'MUSIC_API_URL',
     defaultEndpoint: 'https://api.calamari-sandwich.local/v1/music',
     capabilities: ['BPM & Mood Bed Sync', 'Voiceover Auto-Ducking', 'Web Audio Demo Synth'],
-    testLive: async (apiKey) => ({
+    testLive: async ({ apiKey }) => ({
       ok: apiKey.length >= 6,
       message:
         apiKey.length >= 6
@@ -207,28 +207,99 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
 
 function resolveConnectorKey(
   def: ConnectorDefinition,
-  headers: Record<string, string | undefined>
-): { key: string | null; keySource: ConnectorKeySource } {
-  const sessionKey = headers[def.sessionHeader]?.trim();
+  ctx: ConnectorRequestContext
+): {
+  key: string | null;
+  apiSecret?: string;
+  keySource: ConnectorKeySource;
+  endpoint: string;
+  model?: string;
+  maskedKey?: string;
+  savedInVault: boolean;
+  account?: ConnectorAccountInfo;
+} {
+  const vaultEntry = ctx.vault?.get(def.id);
+  const envEndpoint = def.endpointEnvVar ? process.env[def.endpointEnvVar]?.trim() : undefined;
+  const headerEndpoint = def.sessionEndpointHeader
+    ? ctx.headers[def.sessionEndpointHeader]?.trim()
+    : undefined;
+  const headerModel = def.sessionModelHeader
+    ? ctx.headers[def.sessionModelHeader]?.trim()
+    : undefined;
+
+  const baseEndpoint =
+    headerEndpoint || vaultEntry?.endpoint?.trim() || envEndpoint || def.defaultEndpoint;
+  const baseModel = headerModel || vaultEntry?.model?.trim() || def.defaultModel;
+
+  // Priority 1: Explicit request header
+  const sessionKey = ctx.headers[def.sessionHeader]?.trim();
   if (sessionKey) {
-    return { key: sessionKey, keySource: 'session' };
+    const sessionSecret = def.sessionSecretHeader
+      ? ctx.headers[def.sessionSecretHeader]?.trim()
+      : undefined;
+    return {
+      key: sessionKey,
+      apiSecret: sessionSecret || undefined,
+      keySource: 'session',
+      endpoint: baseEndpoint,
+      model: baseModel,
+      maskedKey: maskCredential(sessionKey, sessionSecret),
+      savedInVault: Boolean(vaultEntry),
+    };
   }
 
+  // Priority 2: Saved local credential vault (data/credentials.json)
+  if (vaultEntry?.apiKey) {
+    return {
+      key: vaultEntry.apiKey,
+      apiSecret: vaultEntry.apiSecret,
+      keySource: 'vault',
+      endpoint: vaultEntry.endpoint?.trim() || baseEndpoint,
+      model: vaultEntry.model?.trim() || baseModel,
+      maskedKey: maskCredential(vaultEntry.apiKey, vaultEntry.apiSecret),
+      savedInVault: true,
+      account: vaultEntry.account,
+    };
+  }
+
+  // Priority 3: Process environment variables
   const primaryEnv = process.env[def.envVar]?.trim();
   if (primaryEnv) {
-    return { key: primaryEnv, keySource: 'env' };
+    const envSecret = def.secretEnvVar ? process.env[def.secretEnvVar]?.trim() : undefined;
+    return {
+      key: primaryEnv,
+      apiSecret: envSecret || undefined,
+      keySource: 'env',
+      endpoint: baseEndpoint,
+      model: baseModel,
+      maskedKey: maskCredential(primaryEnv, envSecret),
+      savedInVault: false,
+    };
   }
 
   if (def.fallbackEnvVars) {
     for (const envName of def.fallbackEnvVars) {
       const val = process.env[envName]?.trim();
       if (val) {
-        return { key: val, keySource: 'env' };
+        return {
+          key: val,
+          keySource: 'env',
+          endpoint: baseEndpoint,
+          model: baseModel,
+          maskedKey: maskCredential(val),
+          savedInVault: false,
+        };
       }
     }
   }
 
-  return { key: null, keySource: 'none' };
+  return {
+    key: null,
+    keySource: 'none',
+    endpoint: baseEndpoint,
+    model: baseModel,
+    savedInVault: false,
+  };
 }
 
 function resolveStatusLevel(
@@ -243,29 +314,40 @@ export function getConnectorDefinition(id: string): ConnectorDefinition | undefi
   return CONNECTOR_DEFINITIONS.find((c) => c.id === id);
 }
 
-export function listConnectors(ctx: ConnectorRequestContext): ConnectorDescriptor[] {
-  return CONNECTOR_DEFINITIONS.map((def) => {
-    const { keySource } = resolveConnectorKey(def, ctx.headers);
-    const demoFallbackEnabled = !ctx.demoDisabledIds?.has(def.id);
-    const status = resolveStatusLevel(keySource, demoFallbackEnabled);
-    const endpoint =
-      (def.endpointEnvVar && process.env[def.endpointEnvVar]?.trim()) || def.defaultEndpoint;
+export function describeConnector(
+  def: ConnectorDefinition,
+  ctx: ConnectorRequestContext
+): ConnectorDescriptor {
+  const resolved = resolveConnectorKey(def, ctx);
+  const demoFallbackEnabled = !ctx.demoDisabledIds?.has(def.id);
+  const status = resolveStatusLevel(resolved.keySource, demoFallbackEnabled);
 
-    return {
-      id: def.id,
-      name: def.name,
-      category: def.category,
-      description: def.description,
-      envVar: def.envVar,
-      sessionHeader: def.sessionHeader,
-      endpointEnvVar: def.endpointEnvVar,
-      defaultEndpoint: endpoint,
-      status,
-      keySource,
-      demoFallbackEnabled,
-      capabilities: def.capabilities,
-    };
-  });
+  return {
+    id: def.id,
+    name: def.name,
+    category: def.category,
+    description: def.description,
+    envVar: def.envVar,
+    sessionHeader: def.sessionHeader,
+    endpointEnvVar: def.endpointEnvVar,
+    defaultEndpoint: resolved.endpoint,
+    portalUrl: def.portalUrl,
+    portalLabel: def.portalLabel,
+    supportsKeySecret: def.supportsKeySecret,
+    status,
+    keySource: resolved.keySource,
+    maskedKey: resolved.maskedKey,
+    savedInVault: resolved.savedInVault,
+    endpoint: resolved.endpoint,
+    model: resolved.model,
+    account: resolved.account,
+    demoFallbackEnabled,
+    capabilities: def.capabilities,
+  };
+}
+
+export function listConnectors(ctx: ConnectorRequestContext): ConnectorDescriptor[] {
+  return CONNECTOR_DEFINITIONS.map((def) => describeConnector(def, ctx));
 }
 
 export async function testConnectorConnection(
@@ -278,11 +360,9 @@ export async function testConnectorConnection(
   }
 
   const start = Date.now();
-  const { key, keySource } = resolveConnectorKey(def, ctx.headers);
+  const resolved = resolveConnectorKey(def, ctx);
   const demoFallbackEnabled = !ctx.demoDisabledIds?.has(def.id);
-  const status = resolveStatusLevel(keySource, demoFallbackEnabled);
-  const endpoint =
-    (def.endpointEnvVar && process.env[def.endpointEnvVar]?.trim()) || def.defaultEndpoint;
+  const status = resolveStatusLevel(resolved.keySource, demoFallbackEnabled);
 
   if (status === 'not_configured') {
     return {
@@ -290,13 +370,13 @@ export async function testConnectorConnection(
       ok: false,
       status: 'not_configured',
       keySource: 'none',
-      message: `${def.name} is Not Configured. Add ${def.envVar} on the server, enter a session key, or enable Demo Mode.`,
+      message: `${def.name} is Not Configured. Add ${def.envVar} on the server, sign in via API Connectors, or enable Demo Mode.`,
       latencyMs: Date.now() - start,
       checkedAt: new Date().toISOString(),
     };
   }
 
-  if (status === 'demo' || !key) {
+  if (status === 'demo' || !resolved.key) {
     const demoRes = def.verifyDemo();
     return {
       connectorId: def.id,
@@ -311,17 +391,119 @@ export async function testConnectorConnection(
   }
 
   const liveRes = def.testLive
-    ? await def.testLive(key, endpoint)
-    : { ok: true, message: `${def.name} key configured (${keySource}).` };
+    ? await def.testLive({
+        apiKey: resolved.key,
+        apiSecret: resolved.apiSecret,
+        endpoint: resolved.endpoint,
+        model: resolved.model,
+      })
+    : { ok: true, message: `${def.name} key configured (${resolved.keySource}).` };
+
+  if (liveRes.ok && liveRes.account && resolved.keySource === 'vault' && ctx.vault) {
+    await ctx.vault.updateAccount(def.id, liveRes.account);
+  }
 
   return {
     connectorId: def.id,
     ok: liveRes.ok,
     status: liveRes.ok ? 'connected' : demoFallbackEnabled ? 'demo' : 'not_configured',
-    keySource,
+    keySource: resolved.keySource,
+    maskedKey: resolved.maskedKey,
+    account: liveRes.account || resolved.account,
     message: liveRes.message,
     latencyMs: Date.now() - start,
     checkedAt: new Date().toISOString(),
     details: liveRes.details,
   };
+}
+
+export async function connectConnector(
+  id: ConnectorId,
+  payload: ConnectConnectorRequest,
+  ctx: ConnectorRequestContext
+): Promise<ConnectConnectorResponse> {
+  const def = getConnectorDefinition(id);
+  if (!def) {
+    throw new Error(`Unknown connector "${id}".`);
+  }
+  if (!ctx.vault) {
+    throw new Error('Credential vault is not initialized.');
+  }
+
+  const apiKey = payload.apiKey.trim();
+  const apiSecret = payload.apiSecret?.trim() || undefined;
+  const endpoint =
+    payload.endpoint?.trim() ||
+    (def.endpointEnvVar ? process.env[def.endpointEnvVar]?.trim() : undefined) ||
+    def.defaultEndpoint;
+  const model = payload.model?.trim() || def.defaultModel;
+
+  const start = Date.now();
+  const liveRes = def.testLive
+    ? await def.testLive({ apiKey, apiSecret, endpoint, model })
+    : { ok: apiKey.length >= 6, message: `${def.name} credential saved.` };
+
+  const maskedKey = maskCredential(apiKey, apiSecret);
+  const checkedAt = new Date().toISOString();
+
+  if (!liveRes.ok) {
+    const result: ConnectorTestResult = {
+      connectorId: def.id,
+      ok: false,
+      status: !ctx.demoDisabledIds?.has(def.id) ? 'demo' : 'not_configured',
+      keySource: 'none',
+      maskedKey,
+      message: liveRes.message,
+      latencyMs: Date.now() - start,
+      checkedAt,
+      details: liveRes.details,
+    };
+    return {
+      ok: false,
+      result,
+      error: liveRes.message,
+    };
+  }
+
+  await ctx.vault.set(def.id, {
+    apiKey,
+    apiSecret,
+    endpoint: endpoint !== def.defaultEndpoint ? endpoint : payload.endpoint?.trim() || undefined,
+    model: model !== def.defaultModel ? model : payload.model?.trim() || undefined,
+    account: liveRes.account,
+  });
+
+  const connector = describeConnector(def, ctx);
+  const result: ConnectorTestResult = {
+    connectorId: def.id,
+    ok: true,
+    status: 'connected',
+    keySource: connector.keySource,
+    maskedKey: connector.maskedKey,
+    account: liveRes.account,
+    message: liveRes.message,
+    latencyMs: Date.now() - start,
+    checkedAt,
+    details: liveRes.details,
+  };
+
+  return {
+    ok: true,
+    connector,
+    result,
+  };
+}
+
+export async function disconnectConnector(
+  id: ConnectorId,
+  ctx: ConnectorRequestContext
+): Promise<ConnectorDescriptor> {
+  const def = getConnectorDefinition(id);
+  if (!def) {
+    throw new Error(`Unknown connector "${id}".`);
+  }
+  if (ctx.vault) {
+    await ctx.vault.delete(def.id);
+  }
+  return describeConnector(def, ctx);
 }

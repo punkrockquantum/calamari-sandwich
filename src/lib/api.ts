@@ -142,7 +142,7 @@ export const studioApi = {
   listVoices(keys?: Partial<SessionConnectorKeys>) {
     return requestJson<{
       voices: VoiceProfile[];
-      source: 'env' | 'session' | 'mock';
+      source: 'env' | 'vault' | 'session' | 'mock';
       fallbackReason?: string;
     }>('/api/voices', undefined, keys);
   },
@@ -182,6 +182,18 @@ export const studioApi = {
         method: 'POST',
         body: JSON.stringify({ projectId, sceneId }),
       },
+      keys
+    );
+  },
+
+  pollHiggsfieldJob(
+    projectId: string,
+    sceneId: string,
+    keys?: Partial<SessionConnectorKeys>
+  ) {
+    return requestJson<{ project: ExplainerProject; higgsfield: HiggsfieldJobState }>(
+      `/api/higgsfield/jobs/${encodeURIComponent(projectId)}/${encodeURIComponent(sceneId)}`,
+      undefined,
       keys
     );
   },

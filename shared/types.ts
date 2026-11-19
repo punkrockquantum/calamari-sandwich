@@ -78,10 +78,14 @@ export interface MusicTrack {
 }
 
 export interface HiggsfieldJobState {
-  status: 'idle' | 'queued' | 'rendering' | 'ready' | 'fallback';
+  status: 'idle' | 'queued' | 'generating' | 'rendering' | 'ready' | 'failed' | 'fallback';
   provider: 'higgsfield' | 'canvas-fallback';
   jobId?: string;
+  statusUrl?: string;
   videoUrl?: string;
+  model?: string;
+  endpoint?: string;
+  errorMessage?: string;
   renderNote?: string;
   updatedAt: string;
 }
@@ -144,14 +148,27 @@ export interface ExplainerProject extends ProjectStateSnapshot {
   updatedAt: string;
 }
 
+export interface ConnectorAccountInfo {
+  provider: ConnectorId;
+  label?: string;
+  tier?: string;
+  characterCount?: number;
+  characterLimit?: number;
+  remainingCharacters?: number;
+  voiceCount?: number;
+  endpoint?: string;
+  model?: string;
+  verifiedAt?: string;
+}
+
 export interface ProviderStatus {
   elevenlabs: {
     configured: boolean;
-    source: 'env' | 'session' | 'mock';
+    source: 'env' | 'vault' | 'session' | 'mock';
   };
   higgsfield: {
     configured: boolean;
-    source: 'env' | 'session' | 'fallback';
+    source: 'env' | 'vault' | 'session' | 'fallback';
   };
 }
 
@@ -164,7 +181,7 @@ export type ConnectorId =
 
 export type ConnectorStatusLevel = 'connected' | 'demo' | 'not_configured';
 
-export type ConnectorKeySource = 'env' | 'session' | 'none';
+export type ConnectorKeySource = 'env' | 'vault' | 'session' | 'none';
 
 export interface ConnectorDescriptor {
   id: ConnectorId;
@@ -175,8 +192,16 @@ export interface ConnectorDescriptor {
   sessionHeader: string;
   endpointEnvVar?: string;
   defaultEndpoint: string;
+  portalUrl?: string;
+  portalLabel?: string;
+  supportsKeySecret?: boolean;
   status: ConnectorStatusLevel;
   keySource: ConnectorKeySource;
+  maskedKey?: string;
+  savedInVault?: boolean;
+  endpoint?: string;
+  model?: string;
+  account?: ConnectorAccountInfo;
   demoFallbackEnabled: boolean;
   capabilities: string[];
 }
@@ -186,10 +211,26 @@ export interface ConnectorTestResult {
   ok: boolean;
   status: ConnectorStatusLevel;
   keySource: ConnectorKeySource;
+  maskedKey?: string;
+  account?: ConnectorAccountInfo;
   message: string;
   latencyMs: number;
   checkedAt: string;
   details?: Record<string, string | number | boolean>;
+}
+
+export interface ConnectConnectorRequest {
+  apiKey: string;
+  apiSecret?: string;
+  endpoint?: string;
+  model?: string;
+}
+
+export interface ConnectConnectorResponse {
+  ok: boolean;
+  connector?: ConnectorDescriptor;
+  result: ConnectorTestResult;
+  error?: string;
 }
 
 export interface GenerateProjectRequest {
@@ -209,4 +250,5 @@ export interface DirectorPromptResult {
   project: ExplainerProject;
   summary: string;
   actions: string[];
+  higgsfieldTargetSceneIds?: string[];
 }

@@ -1,4 +1,7 @@
-import type { VoiceProfile } from '../../shared/types.js';
+import type { ConnectorAccountInfo, VoiceProfile } from '../../shared/types.js';
+import { maskCredential, type CredentialVault } from '../store/credentialVault.js';
+
+export const DEFAULT_ELEVENLABS_ENDPOINT = 'https://api.elevenlabs.io/v1';
 
 export const MOCK_VOICES: VoiceProfile[] = [
   {
@@ -43,34 +46,195 @@ export const MOCK_VOICES: VoiceProfile[] = [
   },
 ];
 
-export function resolveElevenLabsKey(sessionHeaderKey?: string): {
-  key: string | null;
-  source: 'env' | 'session' | 'mock';
-} {
-  const trimmedHeader = sessionHeaderKey?.trim();
-  if (trimmedHeader) {
-    return { key: trimmedHeader, source: 'session' };
-  }
-  const envKey = process.env.ELEVENLABS_API_KEY?.trim();
-  if (envKey) {
-    return { key: envKey, source: 'env' };
-  }
-  return { key: null, source: 'mock' };
+export function resolveElevenLabsEndpoint(
+  vault?: CredentialVault,
+  explicitEndpoint?: string
+): string {
+  return (
+    explicitEndpoint?.trim() ||
+    vault?.get('elevenlabs')?.endpoint?.trim() ||
+    process.env.ELEVENLABS_API_URL?.trim() ||
+    DEFAULT_ELEVENLABS_ENDPOINT
+  ).replace(/\/$/, '');
 }
 
-export async function listElevenLabsVoices(sessionHeaderKey?: string): Promise<{
+export function resolveElevenLabsKey(
+  sessionHeaderKey?: string,
+  vault?: CredentialVault
+): {
+  key: string | null;
+  source: 'env' | 'vault' | 'session' | 'mock';
+  endpoint: string;
+  maskedKey?: string;
+  account?: ConnectorAccountInfo;
+} {
+  const endpoint = resolveElevenLabsEndpoint(vault);
+  const trimmedHeader = sessionHeaderKey?.trim();
+  if (trimmedHeader) {
+    return {
+      key: trimmedHeader,
+      source: 'session',
+      endpoint,
+      maskedKey: maskCredential(trimmedHeader),
+    };
+  }
+
+  const vaultEntry = vault?.get('elevenlabs');
+  if (vaultEntry?.apiKey) {
+    return {
+      key: vaultEntry.apiKey,
+      source: 'vault',
+      endpoint: vaultEntry.endpoint?.trim()?.replace(/\/$/, '') || endpoint,
+      maskedKey: maskCredential(vaultEntry.apiKey),
+      account: vaultEntry.account,
+    };
+  }
+
+  const envKey = process.env.ELEVENLABS_API_KEY?.trim();
+  if (envKey) {
+    return {
+      key: envKey,
+      source: 'env',
+      endpoint,
+      maskedKey: maskCredential(envKey),
+    };
+  }
+
+  return { key: null, source: 'mock', endpoint };
+}
+
+export async function verifyElevenLabsCredentials(
+  apiKey: string,
+  endpoint?: string
+): Promise<{
+  ok: boolean;
+  message: string;
+  account?: ConnectorAccountInfo;
+  details?: Record<string, string | number | boolean>;
+}> {
+  const baseUrl = (
+    endpoint?.trim() ||
+    process.env.ELEVENLABS_API_URL?.trim() ||
+    DEFAULT_ELEVENLABS_ENDPOINT
+  ).replace(/\/$/, '');
+
+  try {
+    const [voicesRes, userRes, subRes] = await Promise.all([
+      fetch(`${baseUrl}/voices`, {
+        headers: { 'xi-api-key': apiKey, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      }),
+      fetch(`${baseUrl}/user`, {
+        headers: { 'xi-api-key': apiKey, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => null),
+      fetch(`${baseUrl}/user/subscription`, {
+        headers: { 'xi-api-key': apiKey, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => null),
+    ]);
+
+    if (!voicesRes.ok && (!userRes || !userRes.ok)) {
+      return {
+        ok: false,
+        message: `ElevenLabs responded with HTTP ${voicesRes.status}. Verify your xi-api-key and permissions.`,
+        details: { httpStatus: voicesRes.status },
+      };
+    }
+
+    let voiceCount = 0;
+    if (voicesRes.ok) {
+      const voicesData = (await voicesRes.json()) as { voices?: unknown[] };
+      voiceCount = voicesData.voices?.length ?? 0;
+    }
+
+    let userName: string | undefined;
+    let userEmail: string | undefined;
+    if (userRes && userRes.ok) {
+      const userData = (await userRes.json()) as {
+        first_name?: string;
+        email?: string;
+        subscription?: {
+          tier?: string;
+          character_count?: number;
+          character_limit?: number;
+        };
+      };
+      userName = userData.first_name?.trim() || undefined;
+      userEmail = userData.email?.trim() || undefined;
+    }
+
+    let tier: string | undefined;
+    let characterCount: number | undefined;
+    let characterLimit: number | undefined;
+    let remainingCharacters: number | undefined;
+
+    if (subRes && subRes.ok) {
+      const subData = (await subRes.json()) as {
+        tier?: string;
+        character_count?: number;
+        character_limit?: number;
+      };
+      tier = subData.tier;
+      characterCount = subData.character_count;
+      characterLimit = subData.character_limit;
+      if (typeof characterLimit === 'number' && typeof characterCount === 'number') {
+        remainingCharacters = Math.max(0, characterLimit - characterCount);
+      }
+    }
+
+    const account: ConnectorAccountInfo = {
+      provider: 'elevenlabs',
+      label: userName || userEmail || (tier ? `ElevenLabs ${tier}` : 'ElevenLabs Account'),
+      tier,
+      characterCount,
+      characterLimit,
+      remainingCharacters,
+      voiceCount,
+      endpoint: baseUrl,
+      verifiedAt: new Date().toISOString(),
+    };
+
+    const quotaPart =
+      typeof remainingCharacters === 'number' && typeof characterLimit === 'number'
+        ? ` • ${remainingCharacters.toLocaleString()} / ${characterLimit.toLocaleString()} chars left`
+        : '';
+    const tierPart = tier ? ` (${tier})` : '';
+
+    return {
+      ok: true,
+      message: `Connected to ElevenLabs${tierPart}: ${voiceCount} voices accessible${quotaPart}.`,
+      account,
+      details: {
+        voicesCount: voiceCount,
+        ...(tier ? { tier } : {}),
+        ...(typeof remainingCharacters === 'number' ? { remainingCharacters } : {}),
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `ElevenLabs verification failed (${err instanceof Error ? err.message : 'network error'}).`,
+    };
+  }
+}
+
+export async function listElevenLabsVoices(
+  sessionHeaderKey?: string,
+  vault?: CredentialVault
+): Promise<{
   voices: VoiceProfile[];
-  source: 'env' | 'session' | 'mock';
+  source: 'env' | 'vault' | 'session' | 'mock';
   fallbackReason?: string;
 }> {
-  const { key, source } = resolveElevenLabsKey(sessionHeaderKey);
+  const { key, source, endpoint } = resolveElevenLabsKey(sessionHeaderKey, vault);
 
   if (!key) {
     return { voices: MOCK_VOICES, source: 'mock' };
   }
 
   try {
-    const res = await fetch('https://api.elevenlabs.io/v1/voices', {
+    const res = await fetch(`${endpoint}/voices`, {
       headers: {
         'xi-api-key': key,
         Accept: 'application/json',
@@ -172,13 +336,14 @@ export async function synthesizeElevenLabsSpeech(params: {
   voiceId: string;
   text: string;
   sessionHeaderKey?: string;
+  vault?: CredentialVault;
 }): Promise<{
   audioBuffer: Buffer;
   contentType: string;
   source: 'elevenlabs' | 'mock';
   fallbackReason?: string;
 }> {
-  const { key } = resolveElevenLabsKey(params.sessionHeaderKey);
+  const { key, endpoint } = resolveElevenLabsKey(params.sessionHeaderKey, params.vault);
   const isMockVoice = params.voiceId.startsWith('mock-');
 
   if (!key || isMockVoice) {
@@ -194,7 +359,7 @@ export async function synthesizeElevenLabsSpeech(params: {
 
   try {
     const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(params.voiceId)}`,
+      `${endpoint}/text-to-speech/${encodeURIComponent(params.voiceId)}`,
       {
         method: 'POST',
         headers: {
