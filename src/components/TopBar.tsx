@@ -1,6 +1,7 @@
 import {
   Clapperboard,
   History,
+  Mic,
   PlugZap,
   Plus,
   Redo2,
@@ -21,6 +22,7 @@ interface TopBarProps {
   onSelectProject: (id: string) => void;
   onOpenNewProject: () => void;
   onOpenCharacterClone: () => void;
+  onOpenVoiceClone: () => void;
   onOpenHistory: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -36,6 +38,7 @@ export function TopBar({
   onSelectProject,
   onOpenNewProject,
   onOpenCharacterClone,
+  onOpenVoiceClone,
   onOpenHistory,
   onUndo,
   onRedo,
@@ -91,7 +94,7 @@ export function TopBar({
             <PlugZap className="w-3.5 h-3.5 text-cyan-300" />
             <span>API Connectors</span>
             <span className="rounded bg-black/30 px-1.5 py-0.2 text-[10px] font-mono">
-              {connectedCount}/{connectors.length || 5}
+              {connectedCount}/{connectors.length || 6}
             </span>
           </button>
         </div>
@@ -163,6 +166,15 @@ export function TopBar({
             </span>
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={onOpenVoiceClone}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2.5 py-1.5 text-xs font-medium text-amber-200 transition"
+        >
+          <Mic className="w-3.5 h-3.5 text-amber-400" />
+          <span className="hidden md:inline">+ Add Voice</span>
+        </button>
 
         <button
           type="button"

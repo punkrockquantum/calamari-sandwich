@@ -10,9 +10,11 @@ import type {
   MusicTrack,
   SceneItem,
   SceneVisualOverlay,
+  TechAsset,
   TransitionType,
 } from '../../shared/types.js';
 import { PRESET_CHARACTERS } from './characterService.js';
+import { retrieveRagContext } from './ragContext.js';
 
 const CAMERA_MOTIONS: CameraMotionPreset[] = [
   'Slow Dolly In',
@@ -115,7 +117,8 @@ export function computeChapterAndScenePlan(durationMinutes: number): {
   chapterCount: number;
   scenesPerChapter: number;
 } {
-  const clamped = Math.max(2, Math.min(30, Math.round(durationMinutes)));
+  const clamped = Math.max(1, Math.min(30, Math.round(durationMinutes)));
+  if (clamped === 1) return { chapterCount: 2, scenesPerChapter: 2 };
   if (clamped <= 3) return { chapterCount: 3, scenesPerChapter: 2 };
   if (clamped <= 6) return { chapterCount: 4, scenesPerChapter: 2 };
   if (clamped <= 12) return { chapterCount: 6, scenesPerChapter: 2 };
@@ -158,9 +161,11 @@ export function generateExplainerProject(params: {
   title?: string;
   primaryVoiceId?: string;
   characters?: CharacterProfile[];
+  assets?: TechAsset[];
+  preferredAssetIds?: string[];
 }): ExplainerProject {
   const topic = params.topic.trim() || 'How Transformer Attention Powers Modern AI';
-  const durationMinutes = Math.max(2, Math.min(30, Math.round(params.durationMinutes || 5)));
+  const durationMinutes = Math.max(1, Math.min(30, Math.round(params.durationMinutes || 5)));
   const audience: AudienceLevel = params.audience || 'engineering';
   const primaryVoiceId = params.primaryVoiceId || 'mock-rachel';
   const characters =
@@ -202,6 +207,21 @@ export function generateExplainerProject(params: {
           ? `Welcome to our ${durationMinutes}-minute deep dive into ${topic}. ${tone.hook} In this opening chapter on ${template.phase}, we unpack ${template.focus} ${topic} ${tone.depthClause}`
           : `In this segment (${subAngle}), notice how ${topic} coordinates state across components. Specifically, we explore ${template.focus} ${topic} with ${tone.pacingLabel}, keeping latency predictable and abstractions clean.`;
 
+      const ragMatches = retrieveRagContext({
+        query: `${topic} ${template.phase} ${subAngle} ${narration}`,
+        assets: params.assets,
+        characters,
+        preferredAssetIds: params.preferredAssetIds,
+        limit: 2,
+      });
+      const matchedAssetIds = ragMatches
+        .filter((m) => m.sourceType === 'asset')
+        .map((m) => m.id);
+      const ragVisualSuffix =
+        ragMatches.length > 0
+          ? ` Grounded with reference context: ${ragMatches.map((m) => `${m.name} (${m.snippet})`).join('; ')}.`
+          : '';
+
       const scene: SceneItem = {
         id: `scene-${sceneIdx + 1}-${crypto.randomUUID().slice(0, 6)}`,
         chapterId,
@@ -209,7 +229,7 @@ export function generateExplainerProject(params: {
         title: `${c + 1}.${s + 1} ${template.phase}${s === 1 ? ' — Applied View' : ''}`,
         durationSec,
         narration,
-        visualPrompt: `Cinematic ${template.style} scene illustrating "${topic}" (${template.phase}), animated ${overlay} telemetry overlay, ${cameraMotion} camera movement, crisp depth-of-field.`,
+        visualPrompt: `Cinematic ${template.style} scene illustrating "${topic}" (${template.phase}), animated ${overlay} telemetry overlay, ${cameraMotion} camera movement, crisp depth-of-field.${ragVisualSuffix}`,
         visualOverlay: overlay,
         cameraMotion,
         cinematicStyle: template.style,
@@ -221,13 +241,16 @@ export function generateExplainerProject(params: {
         higgsfield: {
           status: 'fallback',
           provider: 'canvas-fallback',
-          renderNote: 'Live procedural 16:9 canvas preview ready; trigger Higgsfield render anytime.',
+          renderNote: 'Live procedural 16:9 canvas preview ready; push to Higgsfield or Gemini Veo anytime.',
           updatedAt: new Date().toISOString(),
         },
+        assetIds: matchedAssetIds,
+        ragContext: ragMatches,
         keyPoints: [
           `${template.phase}: ${topic.split(' ').slice(0, 4).join(' ')}`,
           `Pacing: ~${Math.round((durationSec / 60) * 145)} spoken words (${durationSec}s)`,
           `Stage: ${cameraMotion} • ${template.style}`,
+          ...(ragMatches[0] ? [`RAG Context: ${ragMatches[0].name}`] : []),
         ],
       };
 

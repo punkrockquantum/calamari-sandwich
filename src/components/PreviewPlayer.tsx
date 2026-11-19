@@ -16,16 +16,19 @@ import type {
   CharacterProfile,
   CinematicStyle,
   ExplainerProject,
+  HiggsfieldJobState,
   SceneItem,
+  TechAsset,
 } from '@shared/types';
 
 interface PreviewPlayerProps {
   project: ExplainerProject;
+  assets: TechAsset[];
   currentTimeSec: number;
   isPlaying: boolean;
   isMuted: boolean;
   activeSceneId: string;
-  activeVoiceSource?: 'elevenlabs' | 'mock' | null;
+  activeVoiceSource?: 'elevenlabs' | 'native' | 'mock' | null;
   onTogglePlay: () => void;
   onToggleMute: () => void;
   onSeek: (sec: number) => void;
@@ -86,8 +89,21 @@ function formatTimecode(totalSec: number): string {
   return `${m.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
 }
 
+function pickActiveExternalJob(scene?: SceneItem): HiggsfieldJobState | undefined {
+  if (!scene) return undefined;
+  if (scene.activeVideoProvider === 'gemini_veo' && scene.veo) return scene.veo;
+  if (scene.activeVideoProvider === 'higgsfield') return scene.higgsfield;
+  if (scene.veo?.status === 'ready' && scene.veo.videoUrl) return scene.veo;
+  if (scene.higgsfield.status === 'ready' && scene.higgsfield.videoUrl) return scene.higgsfield;
+  if (scene.veo && (scene.veo.status === 'queued' || scene.veo.status === 'generating')) {
+    return scene.veo;
+  }
+  return scene.higgsfield;
+}
+
 export function PreviewPlayer({
   project,
+  assets,
   currentTimeSec,
   isPlaying,
   isMuted,
@@ -131,18 +147,45 @@ export function PreviewPlayer({
     (c) => c.id === activeScene?.characterId
   );
 
-  const higgsfieldVideoUrl =
-    activeScene?.higgsfield.provider === 'higgsfield' &&
-    activeScene.higgsfield.status === 'ready' &&
-    activeScene.higgsfield.videoUrl &&
-    activeScene.higgsfield.videoUrl !== failedVideoUrl
-      ? activeScene.higgsfield.videoUrl
+  const sceneAssets = useMemo(() => {
+    if (!activeScene) return [];
+    const ids = new Set([
+      ...(activeScene.assetIds || []),
+      ...(activeScene.ragContext || [])
+        .filter((r) => r.sourceType === 'asset')
+        .map((r) => r.id),
+    ]);
+    return assets.filter((a) => ids.has(a.id));
+  }, [activeScene, assets]);
+
+  const activeExternalJob = pickActiveExternalJob(activeScene);
+  const externalVideoUrl =
+    activeExternalJob &&
+    activeExternalJob.provider !== 'canvas-fallback' &&
+    activeExternalJob.status === 'ready' &&
+    activeExternalJob.videoUrl &&
+    activeExternalJob.videoUrl !== failedVideoUrl
+      ? activeExternalJob.videoUrl
       : null;
 
-  // Sync Higgsfield <video> element with timeline playback & seek
+  const ragVideoAsset = sceneAssets.find(
+    (a) => a.sourceType === 'video' && a.mediaUrls[0] && a.mediaUrls[0] !== failedVideoUrl
+  );
+  const ragPhotoAsset = sceneAssets.find((a) => a.sourceType === 'photos' && a.mediaUrls[0]);
+
+  const stageVideoUrl = externalVideoUrl || ragVideoAsset?.mediaUrls[0] || null;
+  const stageVideoLabel = externalVideoUrl
+    ? activeExternalJob?.provider === 'gemini_veo'
+      ? 'Gemini Veo Video'
+      : 'Higgsfield Video'
+    : ragVideoAsset
+      ? `RAG Clip: ${ragVideoAsset.name}`
+      : null;
+
+  // Sync <video> element with timeline playback & seek
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !higgsfieldVideoUrl || !activeEntry) return;
+    if (!video || !stageVideoUrl || !activeEntry) return;
 
     video.muted = isMuted;
     const localTime = Math.max(0, currentTimeSec - activeEntry.startSec);
@@ -165,24 +208,25 @@ export function PreviewPlayer({
     } else {
       video.pause();
     }
-  }, [higgsfieldVideoUrl, isPlaying, isMuted, activeEntry, currentTimeSec]);
+  }, [stageVideoUrl, isPlaying, isMuted, activeEntry, currentTimeSec]);
 
-  // Preload uploaded character images for canvas rendering
+  // Preload uploaded character & RAG asset images for canvas rendering
   useEffect(() => {
-    for (const char of project.characters) {
-      if (char.sourceType === 'photos' && char.mediaUrls[0]) {
-        const url = char.mediaUrls[0];
-        if (!imageCacheRef.current.has(url)) {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.src = url;
-          imageCacheRef.current.set(url, img);
-        }
+    const urlsToPreload = [
+      ...project.characters.flatMap((c) => (c.sourceType === 'photos' ? c.mediaUrls : [])),
+      ...assets.flatMap((a) => (a.sourceType === 'photos' ? a.mediaUrls : [])),
+    ];
+    for (const url of urlsToPreload) {
+      if (url && !imageCacheRef.current.has(url)) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = url;
+        imageCacheRef.current.set(url, img);
       }
     }
-  }, [project.characters]);
+  }, [project.characters, assets]);
 
-  // Continuous 60fps Canvas stage rendering with camera motions, overlays, character & transitions
+  // Continuous 60fps Canvas stage rendering with camera motions, RAG photo callouts, character & transitions
   useEffect(() => {
     let rafId = 0;
     let lastTs = performance.now();
@@ -280,8 +324,57 @@ export function PreviewPlayer({
                 : w * 0.36;
           const diagCenterY = h * 0.46;
 
+          const ragPhotoUrl = ragPhotoAsset?.mediaUrls[0];
+          const ragPhotoImg = ragPhotoUrl ? imageCacheRef.current.get(ragPhotoUrl) : undefined;
+
           ctx.save();
-          if (activeScene.visualOverlay === 'neural-graph' || activeScene.visualOverlay === 'architecture-flow') {
+          if (ragPhotoAsset && ragPhotoImg && ragPhotoImg.complete && ragPhotoImg.naturalWidth > 0) {
+            // Render uploaded RAG asset photo / diagram framed cleanly on stage with technical callout
+            const boxW = 430;
+            const boxH = 242;
+            const bx = diagCenterX - boxW / 2;
+            const by = diagCenterY - boxH / 2 - 12;
+
+            ctx.fillStyle = 'rgba(9, 12, 20, 0.92)';
+            ctx.strokeStyle = `${palette.accent}99`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(bx - 4, by - 4, boxW + 8, boxH + 8, 14);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(bx, by, boxW, boxH, 10);
+            ctx.clip();
+            const scale = Math.max(boxW / ragPhotoImg.width, boxH / ragPhotoImg.height);
+            const dw = ragPhotoImg.width * scale;
+            const dh = ragPhotoImg.height * scale;
+            ctx.drawImage(ragPhotoImg, bx + (boxW - dw) / 2, by + (boxH - dh) / 2, dw, dh);
+            ctx.restore();
+
+            // Technical callout tag below asset photo
+            ctx.fillStyle = 'rgba(9, 9, 14, 0.88)';
+            ctx.strokeStyle = `${palette.secondary}88`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(bx, by + boxH + 10, boxW, 38, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = palette.accent;
+            ctx.font = '600 11px Inter, system-ui, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`RAG ASSET • ${ragPhotoAsset.name}`, bx + 12, by + boxH + 26);
+
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = '10px ui-monospace, SFMono-Regular, monospace';
+            const specLine = (ragPhotoAsset.technicalSpecs || ragPhotoAsset.description).slice(0, 62);
+            ctx.fillText(specLine, bx + 12, by + boxH + 40);
+          } else if (
+            activeScene.visualOverlay === 'neural-graph' ||
+            activeScene.visualOverlay === 'architecture-flow'
+          ) {
             const nodes = [
               { x: diagCenterX - 180, y: diagCenterY - 70, label: 'Input' },
               { x: diagCenterX - 55, y: diagCenterY - 110, label: 'Encode' },
@@ -297,7 +390,6 @@ export function PreviewPlayer({
               [3, 4],
             ];
 
-            // Edges & animated pulse packets
             edges.forEach(([a, b], idx) => {
               const na = nodes[a];
               const nb = nodes[b];
@@ -317,7 +409,6 @@ export function PreviewPlayer({
               ctx.fill();
             });
 
-            // Nodes
             nodes.forEach((n, idx) => {
               const pulse = 1 + Math.sin(t * 2.4 + idx) * 0.08;
               ctx.fillStyle = '#0f172a';
@@ -357,14 +448,13 @@ export function PreviewPlayer({
             ctx.font = '13px ui-monospace, SFMono-Regular, monospace';
             ctx.textAlign = 'left';
             lines.forEach((line, i) => {
-              const reveal = Math.min(1, Math.max(0, (progress * 3.5) - i * 0.25));
+              const reveal = Math.min(1, Math.max(0, progress * 3.5 - i * 0.25));
               if (reveal > 0.05) {
                 ctx.fillStyle = i === 0 ? palette.accent : i === 6 ? palette.secondary : '#cbd5e1';
                 ctx.fillText(line.slice(0, Math.ceil(line.length * reveal)), bx + 18, by + 34 + i * 25);
               }
             });
           } else {
-            // wave-spectrum or packet-stream
             const barCount = 26;
             const totalW = 390;
             const startX = diagCenterX - totalW / 2;
@@ -394,7 +484,6 @@ export function PreviewPlayer({
             const cy = h * 0.52;
             const radius = activeScene.characterPlacement === 'center' ? 78 : 72;
 
-            // Speaking pulse halo
             const speakAmp = isPlaying ? 1 + Math.abs(Math.sin(t * 7.5)) * 0.14 : 1.03;
             ctx.strokeStyle = activeCharacter.previewColor;
             ctx.lineWidth = 3;
@@ -404,7 +493,6 @@ export function PreviewPlayer({
             ctx.stroke();
             ctx.globalAlpha = 1;
 
-            // Portrait circle
             const photoUrl = activeCharacter.mediaUrls[0];
             const cachedImg = photoUrl ? imageCacheRef.current.get(photoUrl) : undefined;
 
@@ -425,7 +513,6 @@ export function PreviewPlayer({
               ctx.fillStyle = avatarGrad;
               ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
 
-              // Stylized silhouette
               ctx.fillStyle = 'rgba(255,255,255,0.92)';
               ctx.beginPath();
               ctx.arc(cx, cy - 12, 22, 0, Math.PI * 2);
@@ -436,14 +523,12 @@ export function PreviewPlayer({
             }
             ctx.restore();
 
-            // Rim ring
             ctx.strokeStyle = activeCharacter.traits.accentColor || palette.accent;
             ctx.lineWidth = 3;
             ctx.beginPath();
             ctx.arc(cx, cy, radius, 0, Math.PI * 2);
             ctx.stroke();
 
-            // Character nameplate
             ctx.fillStyle = 'rgba(9, 9, 13, 0.85)';
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
             ctx.lineWidth = 1;
@@ -463,7 +548,6 @@ export function PreviewPlayer({
 
           ctx.restore();
 
-          // Transition effect in first 0.7s of scene
           if (localElapsed < 0.7) {
             const alpha = 1 - localElapsed / 0.7;
             if (activeScene.transitionIn === 'Glitch Cut') {
@@ -479,10 +563,9 @@ export function PreviewPlayer({
             }
           }
 
-          // Top HUD bar inside canvas
           ctx.fillStyle = 'rgba(9, 9, 13, 0.72)';
           ctx.beginPath();
-          ctx.roundRect(18, 16, 360, 30, 8);
+          ctx.roundRect(18, 16, 400, 30, 8);
           ctx.fill();
           ctx.fillStyle = palette.accent;
           ctx.font = '600 11px Inter, system-ui, sans-serif';
@@ -493,7 +576,6 @@ export function PreviewPlayer({
             35
           );
 
-          // Live subtitle / narration caption bar
           ctx.fillStyle = 'rgba(9, 9, 13, 0.82)';
           ctx.beginPath();
           ctx.roundRect(44, h - 78, w - 88, 56, 10);
@@ -514,7 +596,7 @@ export function PreviewPlayer({
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [activeScene, activeEntry, activeChapter, activeCharacter, currentTimeSec, isPlaying]);
+  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, currentTimeSec, isPlaying]);
 
   const activeIndex = sceneOffsets.findIndex((e) => e.scene.id === activeScene?.id);
 
@@ -526,6 +608,9 @@ export function PreviewPlayer({
       onSelectScene(target.scene.id);
     }
   };
+
+  const isExternalPolling =
+    activeExternalJob?.status === 'queued' || activeExternalJob?.status === 'generating';
 
   return (
     <div className="flex flex-col bg-[#0d0d14] border border-zinc-800/90 rounded-xl overflow-hidden shadow-2xl">
@@ -549,32 +634,32 @@ export function PreviewPlayer({
               className={`text-[10px] px-2 py-0.5 rounded-full border ${
                 activeVoiceSource === 'elevenlabs'
                   ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+                  : activeVoiceSource === 'native'
+                    ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
+                    : 'border-zinc-700 bg-zinc-900 text-zinc-300'
               }`}
             >
-              {activeVoiceSource === 'elevenlabs' ? 'ElevenLabs VO' : 'Demo VO'}
+              {activeVoiceSource === 'elevenlabs'
+                ? 'ElevenLabs VO'
+                : activeVoiceSource === 'native'
+                  ? 'Native Cloned VO'
+                  : 'Demo VO'}
             </span>
           )}
           <span
             className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border ${
-              higgsfieldVideoUrl
+              stageVideoUrl
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                : activeScene?.higgsfield.status === 'queued' ||
-                    activeScene?.higgsfield.status === 'generating'
+                : isExternalPolling
                   ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
                   : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
             }`}
           >
-            {(activeScene?.higgsfield.status === 'queued' ||
-              activeScene?.higgsfield.status === 'generating') && (
-              <Loader2 className="w-2.5 h-2.5 animate-spin" />
-            )}
-            {higgsfieldVideoUrl
-              ? 'Higgsfield Video'
-              : activeScene?.higgsfield.status === 'queued' ||
-                  activeScene?.higgsfield.status === 'generating'
-                ? `Higgsfield ${activeScene.higgsfield.status}...`
-                : 'Canvas Stage Fallback'}
+            {isExternalPolling && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
+            {stageVideoLabel ||
+              (isExternalPolling
+                ? `${activeExternalJob?.provider === 'gemini_veo' ? 'Gemini Veo' : 'Higgsfield'} ${activeExternalJob?.status}...`
+                : 'Canvas Stage Native')}
           </span>
           <button
             type="button"
@@ -587,29 +672,29 @@ export function PreviewPlayer({
         </div>
       </div>
 
-      {/* 16:9 Stage: Higgsfield Generated Video (when ready) or 60fps Canvas Fallback */}
+      {/* 16:9 Stage */}
       <div className="relative bg-[#06060a] py-2 px-3 flex items-center justify-center">
         <div className="relative w-full max-w-[540px] aspect-video rounded-lg overflow-hidden border border-zinc-800/70 shadow-lg bg-black">
           <canvas
             ref={canvasRef}
             width={960}
             height={540}
-            className={`w-full h-full block ${higgsfieldVideoUrl ? 'hidden' : ''}`}
+            className={`w-full h-full block ${stageVideoUrl ? 'hidden' : ''}`}
           />
-          {higgsfieldVideoUrl && (
+          {stageVideoUrl && (
             <>
               <video
                 ref={videoRef}
-                key={higgsfieldVideoUrl}
-                src={higgsfieldVideoUrl}
+                key={stageVideoUrl}
+                src={stageVideoUrl}
                 playsInline
                 loop
                 muted={isMuted}
-                onError={() => setFailedVideoUrl(higgsfieldVideoUrl)}
+                onError={() => setFailedVideoUrl(stageVideoUrl)}
                 className="w-full h-full object-cover block"
               />
               <div className="pointer-events-none absolute top-2.5 left-2.5 rounded-md bg-black/70 border border-white/10 px-2 py-1 text-[10px] font-medium text-cyan-300">
-                {activeChapter?.title || 'Chapter'} • {activeScene?.cameraMotion}
+                {activeChapter?.title || 'Chapter'} • {ragVideoAsset ? ragVideoAsset.technicalSpecs || ragVideoAsset.name : activeScene?.cameraMotion}
               </div>
               {activeScene?.narration && (
                 <div className="pointer-events-none absolute bottom-2.5 left-4 right-4 rounded-lg bg-black/75 border border-white/10 px-3 py-1.5 text-center text-[11px] text-zinc-100 line-clamp-2">
@@ -623,7 +708,6 @@ export function PreviewPlayer({
 
       {/* Transport & Scrubber */}
       <div className="px-3.5 py-2.5 bg-zinc-950/90 border-t border-zinc-800/80 flex flex-col gap-2">
-        {/* Progress bar with chapter ticks */}
         <div
           className="relative h-2 bg-zinc-800 rounded-full cursor-pointer group"
           onClick={(e) => {

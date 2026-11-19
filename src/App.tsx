@@ -9,7 +9,10 @@ import type {
   ExplainerProject,
   GenerateProjectRequest,
   MusicTrack,
+  PushVoiceElevenLabsResult,
+  RagContextMatch,
   SceneItem,
+  TechAsset,
   VoiceProfile,
 } from '@shared/types';
 import { studioApi } from '@/lib/api';
@@ -33,6 +36,7 @@ import {
   stopAllAudio,
   stopVoiceAudio,
 } from '@/lib/audioEngine';
+import { AssetUploadModal } from '@/components/AssetUploadModal';
 import { CharacterCloningModal } from '@/components/CharacterCloningModal';
 import { ConnectorsWorkspace } from '@/components/ConnectorsWorkspace';
 import { DirectorPromptBar } from '@/components/DirectorPromptBar';
@@ -43,6 +47,7 @@ import { PreviewPlayer } from '@/components/PreviewPlayer';
 import { ProviderConnectModal } from '@/components/ProviderConnectModal';
 import { TopBar, type WorkspaceView } from '@/components/TopBar';
 import { TopicGeneratorModal } from '@/components/TopicGeneratorModal';
+import { VoiceCloningModal } from '@/components/VoiceCloningModal';
 
 export function App() {
   const [projects, setProjects] = useState<ExplainerProject[]>([]);
@@ -54,6 +59,7 @@ export function App() {
   const [voiceSource, setVoiceSource] = useState<'env' | 'vault' | 'session' | 'mock'>('mock');
   const [allCharacters, setAllCharacters] = useState<CharacterProfile[]>([]);
   const [presets, setPresets] = useState<CharacterProfile[]>([]);
+  const [assets, setAssets] = useState<TechAsset[]>([]);
 
   const [sessionKeys, setSessionKeys] = useState<SessionConnectorKeys>(() =>
     loadSessionConnectorKeys()
@@ -70,20 +76,28 @@ export function App() {
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const [activeVoiceSource, setActiveVoiceSource] = useState<'elevenlabs' | 'mock' | null>(null);
+  const [activeVoiceSource, setActiveVoiceSource] = useState<
+    'elevenlabs' | 'native' | 'mock' | null
+  >(null);
 
   const [showNewModal, setShowNewModal] = useState(false);
   const [showCloneModal, setShowCloneModal] = useState(false);
+  const [showVoiceModal, setShowVoiceModal] = useState(false);
+  const [showAssetModal, setShowAssetModal] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [connectModalId, setConnectModalId] = useState<ConnectorId | null>(null);
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [lastActionSummary, setLastActionSummary] = useState<string | null>(null);
+  const [lastRagContext, setLastRagContext] = useState<RagContextMatch[] | undefined>(undefined);
+  const [lastVoicePushResult, setLastVoicePushResult] = useState<PushVoiceElevenLabsResult | null>(
+    null
+  );
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const ambientStopRef = useRef<(() => void) | null>(null);
   const voiceCacheRef = useRef<
-    Map<string, { blobUrl: string; source: 'elevenlabs' | 'mock' }>
+    Map<string, { blobUrl: string; source: 'elevenlabs' | 'native' | 'mock' }>
   >(new Map());
   const lastSpokenSceneKeyRef = useRef<string | null>(null);
 
@@ -105,14 +119,16 @@ export function App() {
     let mounted = true;
     (async () => {
       try {
-        const [projRes, charRes] = await Promise.all([
+        const [projRes, charRes, assetRes] = await Promise.all([
           studioApi.listProjects(),
           studioApi.listCharacters(),
+          studioApi.listAssets(),
         ]);
         if (!mounted) return;
         setProjects(projRes.projects);
         setAllCharacters(charRes.characters);
         setPresets(charRes.presets);
+        setAssets(assetRes.assets);
         if (projRes.projects[0]) {
           setActiveProjectId(projRes.projects[0].id);
           setActiveSceneId(projRes.projects[0].scenes[0]?.id || '');
@@ -212,7 +228,7 @@ export function App() {
     }
   }, [currentTimeSec, activeProject, isPlaying, activeSceneId]);
 
-  // Real ElevenLabs / fallback voiceover playback synchronized with timeline playback
+  // Synchronized ElevenLabs / Native Cloned / Demo voiceover playback during timeline playback
   useEffect(() => {
     if (!isPlaying || isMuted || !activeProject || !activeScene) {
       stopVoiceAudio();
@@ -258,7 +274,12 @@ export function App() {
           sessionKeys
         );
         if (cancelled) return;
-        const normalizedSource = res.source === 'elevenlabs' ? 'elevenlabs' : 'mock';
+        const normalizedSource =
+          res.source === 'elevenlabs'
+            ? 'elevenlabs'
+            : res.source === 'native'
+              ? 'native'
+              : 'mock';
         voiceCacheRef.current.set(spokenKey, {
           blobUrl: res.blobUrl,
           source: normalizedSource,
@@ -277,37 +298,56 @@ export function App() {
     };
   }, [isPlaying, isMuted, activeProject, activeScene, currentTimeSec, sessionKeys]);
 
-  // Poll queued / generating Higgsfield render jobs until ready or failed
-  const pendingHiggsfieldSceneIds = useMemo(() => {
-    if (!activeProject) return [];
-    return activeProject.scenes
-      .filter(
-        (sc) =>
-          sc.higgsfield.provider === 'higgsfield' &&
-          (sc.higgsfield.status === 'queued' ||
-            sc.higgsfield.status === 'generating' ||
-            sc.higgsfield.status === 'rendering')
-      )
-      .map((sc) => sc.id);
+  // Poll queued / generating Higgsfield and Gemini Veo jobs until ready or failed
+  const pendingProviderJobs = useMemo(() => {
+    if (!activeProject) return [] as Array<{ sceneId: string; provider: 'higgsfield' | 'gemini_veo' }>;
+    const pending: Array<{ sceneId: string; provider: 'higgsfield' | 'gemini_veo' }> = [];
+    for (const sc of activeProject.scenes) {
+      if (
+        sc.higgsfield.provider === 'higgsfield' &&
+        (sc.higgsfield.status === 'queued' ||
+          sc.higgsfield.status === 'generating' ||
+          sc.higgsfield.status === 'rendering')
+      ) {
+        pending.push({ sceneId: sc.id, provider: 'higgsfield' });
+      }
+      if (
+        sc.veo &&
+        sc.veo.provider === 'gemini_veo' &&
+        (sc.veo.status === 'queued' ||
+          sc.veo.status === 'generating' ||
+          sc.veo.status === 'rendering')
+      ) {
+        pending.push({ sceneId: sc.id, provider: 'gemini_veo' });
+      }
+    }
+    return pending;
   }, [activeProject]);
 
   useEffect(() => {
-    if (!activeProject || pendingHiggsfieldSceneIds.length === 0) return;
+    if (!activeProject || pendingProviderJobs.length === 0) return;
     let cancelled = false;
     const projectId = activeProject.id;
 
     const timer = window.setInterval(() => {
       void (async () => {
-        for (const scId of pendingHiggsfieldSceneIds) {
+        for (const item of pendingProviderJobs) {
           if (cancelled) return;
           try {
-            const res = await studioApi.pollHiggsfieldJob(projectId, scId, sessionKeys);
+            const res = await studioApi.pollProviderJob(
+              projectId,
+              item.sceneId,
+              item.provider,
+              sessionKeys
+            );
             if (!cancelled) {
               upsertProject(res.project);
-              if (res.higgsfield.status === 'ready') {
-                setLastActionSummary(`Higgsfield video ready for scene`);
-              } else if (res.higgsfield.status === 'failed') {
-                setErrorBanner(res.higgsfield.errorMessage || 'Higgsfield generation failed.');
+              if (res.job.status === 'ready') {
+                setLastActionSummary(
+                  `${item.provider === 'gemini_veo' ? 'Gemini Veo' : 'Higgsfield'} video ready`
+                );
+              } else if (res.job.status === 'failed') {
+                setErrorBanner(res.job.errorMessage || `${item.provider} generation failed.`);
               }
             }
           } catch {
@@ -321,7 +361,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeProject, pendingHiggsfieldSceneIds, sessionKeys]);
+  }, [activeProject, pendingProviderJobs, sessionKeys]);
 
   const handleGenerateProject = async (payload: GenerateProjectRequest) => {
     setBusyAction('generate');
@@ -333,6 +373,7 @@ export function App() {
       setIsPlaying(false);
       setActiveSceneId(project.scenes[0]?.id || '');
       setActiveView('studio');
+      setLastRagContext(project.scenes[0]?.ragContext);
       setLastActionSummary(`Generated "${project.title}"`);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Generation failed.');
@@ -348,6 +389,7 @@ export function App() {
     try {
       const res = await studioApi.runDirectorPrompt(activeProject.id, prompt, sessionKeys);
       upsertProject(res.project);
+      setLastRagContext(res.ragContextUsed);
       setLastActionSummary(res.summary);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Director edit failed.');
@@ -421,6 +463,34 @@ export function App() {
     }
   };
 
+  const handlePushSceneToProvider = async (
+    provider: 'higgsfield' | 'gemini_veo',
+    sceneId: string,
+    characterId?: string
+  ) => {
+    if (!activeProject) return;
+    setBusyAction(provider);
+    setErrorBanner(null);
+    try {
+      const { project, job } = await studioApi.pushSceneToProvider(
+        provider,
+        activeProject.id,
+        sceneId,
+        characterId,
+        sessionKeys
+      );
+      upsertProject(project);
+      setLastActionSummary(
+        job.renderNote ||
+          `Pushed scene to ${provider === 'gemini_veo' ? 'Gemini Veo' : 'Higgsfield'}`
+      );
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Provider push failed.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handlePreviewVoice = async (
     voiceId: string,
     sampleText?: string,
@@ -448,13 +518,71 @@ export function App() {
       setLastActionSummary(
         res.source === 'elevenlabs'
           ? 'Synthesized ElevenLabs voiceover'
-          : 'Played studio fallback voiceover'
+          : res.source === 'native'
+            ? 'Synthesized native cloned voiceover'
+            : 'Played studio fallback voiceover'
       );
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Voice synthesis failed.');
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const handleCloneVoice = async (formData: FormData) => {
+    setBusyAction('clone-voice');
+    try {
+      const { voice } = await studioApi.cloneVoice(formData);
+      await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      if (activeProject && activeScene) {
+        const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
+          voiceId: voice.voice_id,
+        });
+        upsertProject(updated.project);
+      }
+      setLastActionSummary(`Cloned native voice "${voice.name}"`);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handlePushVoiceToElevenLabs = async (voiceId: string) => {
+    setBusyAction(`push-voice-${voiceId}`);
+    setErrorBanner(null);
+    try {
+      const res = await studioApi.pushVoiceToElevenLabs(voiceId, sessionKeys);
+      setLastVoicePushResult(res);
+      await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
+      setLastActionSummary(res.message);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to push voice to ElevenLabs.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleUploadAsset = async (formData: FormData) => {
+    setBusyAction('upload-asset');
+    try {
+      const { asset } = await studioApi.uploadAsset(formData);
+      setAssets((prev) => [asset, ...prev]);
+      if (activeProject && activeScene) {
+        const nextAssetIds = Array.from(new Set([...(activeScene.assetIds || []), asset.id]));
+        const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
+          assetIds: nextAssetIds,
+        });
+        upsertProject(updated.project);
+      }
+      setLastActionSummary(`Imported asset "${asset.name}" into RAG Context Vault`);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDeleteAsset = async (assetId: string) => {
+    await studioApi.deleteAsset(assetId);
+    setAssets((prev) => prev.filter((a) => a.id !== assetId));
+    setLastActionSummary('Removed asset from RAG Context Vault');
   };
 
   const handleCloneCharacter = async (formData: FormData) => {
@@ -532,13 +660,17 @@ export function App() {
       setTestResults((prev) => ({ ...prev, [id]: res.result }));
     }
     if (res.ok) {
-      // Clear temporary session key override so the persisted local vault takes precedence
       const nextKeys = { ...sessionKeys, [id]: '' };
       saveSessionConnectorKeys(nextKeys);
       setSessionKeys(nextKeys);
 
       const { voiceRes } = await refreshConnectorsAndVoices(nextKeys, demoPrefs);
-      if (id === 'elevenlabs' && voiceRes.source !== 'mock' && voiceRes.voices.length > 0 && activeProject) {
+      if (
+        id === 'elevenlabs' &&
+        voiceRes.source !== 'mock' &&
+        voiceRes.voices.length > 0 &&
+        activeProject
+      ) {
         const firstRealVoice = voiceRes.voices.find((v) => v.source === 'elevenlabs');
         if (firstRealVoice && activeScene?.voiceId.startsWith('mock-')) {
           const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
@@ -577,8 +709,8 @@ export function App() {
       const { voiceRes } = await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
       setLastActionSummary(
         voiceRes.source === 'mock'
-          ? 'Using studio demo voices (connect ElevenLabs for library voices)'
-          : `Synced ${voiceRes.voices.length} ElevenLabs voices`
+          ? 'Using native & studio voices (connect ElevenLabs for library voices)'
+          : `Synced ${voiceRes.voices.length} voices`
       );
     } finally {
       setBusyAction(null);
@@ -649,6 +781,7 @@ export function App() {
         }}
         onOpenNewProject={() => setShowNewModal(true)}
         onOpenCharacterClone={() => setShowCloneModal(true)}
+        onOpenVoiceClone={() => setShowVoiceModal(true)}
         onOpenHistory={() => setShowHistoryDrawer(true)}
         onUndo={() => void handleUndo()}
         onRedo={() => void handleRedo()}
@@ -693,6 +826,7 @@ export function App() {
             <div className="flex-1 min-w-0 flex flex-col gap-3 overflow-y-auto pr-0.5">
               <PreviewPlayer
                 project={activeProject}
+                assets={assets}
                 currentTimeSec={currentTimeSec}
                 isPlaying={isPlaying}
                 isMuted={isMuted}
@@ -719,6 +853,7 @@ export function App() {
               <DirectorPromptBar
                 onSubmitPrompt={handleDirectorPrompt}
                 lastActionSummary={lastActionSummary}
+                lastRagContext={lastRagContext}
                 busy={busyAction === 'director'}
               />
             </div>
@@ -731,13 +866,20 @@ export function App() {
               voiceSource={voiceSource}
               connectors={connectors}
               allCharacters={allCharacters}
+              assets={assets}
+              lastVoicePushResult={lastVoicePushResult}
               onUpdateScene={handleUpdateScene}
               onTriggerHiggsfield={handleTriggerHiggsfield}
+              onPushSceneToProvider={handlePushSceneToProvider}
               onPreviewVoice={handlePreviewVoice}
+              onPushVoiceToElevenLabs={handlePushVoiceToElevenLabs}
               onSyncElevenLabsVoices={handleSyncElevenLabsVoices}
               onAssignVoiceToAllScenes={handleAssignVoiceToAllScenes}
               onOpenConnectModal={(id) => setConnectModalId(id)}
               onOpenCharacterClone={() => setShowCloneModal(true)}
+              onOpenVoiceClone={() => setShowVoiceModal(true)}
+              onOpenAssetUpload={() => setShowAssetModal(true)}
+              onDeleteAsset={handleDeleteAsset}
               onAddMusicTrack={handleAddMusicTrack}
               onDeleteMusicTrack={handleDeleteMusicTrack}
               busyAction={busyAction}
@@ -773,6 +915,20 @@ export function App() {
         onClose={() => setShowCloneModal(false)}
         onCloneSubmit={handleCloneCharacter}
         busy={busyAction === 'clone'}
+      />
+
+      <VoiceCloningModal
+        open={showVoiceModal}
+        onClose={() => setShowVoiceModal(false)}
+        onCloneVoice={handleCloneVoice}
+        busy={busyAction === 'clone-voice'}
+      />
+
+      <AssetUploadModal
+        open={showAssetModal}
+        onClose={() => setShowAssetModal(false)}
+        onUploadAsset={handleUploadAsset}
+        busy={busyAction === 'upload-asset'}
       />
 
       <IterationHistoryDrawer

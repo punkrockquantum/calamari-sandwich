@@ -1,0 +1,145 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import type { VoiceProfile, VoiceTraits } from '../../shared/types.js';
+
+export const ALLOWED_VOICE_AUDIO_MIMES = new Set([
+  'audio/wav',
+  'audio/x-wav',
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/webm',
+  'audio/ogg',
+  'audio/mp4',
+  'audio/aac',
+  'audio/x-m4a',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+]);
+
+interface VoiceStoreFile {
+  voices: VoiceProfile[];
+}
+
+export class VoiceStore {
+  private readonly dataFile: string;
+  private readonly voicesUploadDir: string;
+  private initialized = false;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  constructor(baseDir: string = path.resolve(process.cwd(), 'data')) {
+    this.dataFile = path.join(baseDir, 'voices.json');
+    this.voicesUploadDir = path.join(baseDir, 'uploads', 'voices');
+  }
+
+  getVoicesUploadDir(): string {
+    return this.voicesUploadDir;
+  }
+
+  async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    await fs.mkdir(path.dirname(this.dataFile), { recursive: true });
+    await fs.mkdir(this.voicesUploadDir, { recursive: true });
+    try {
+      await fs.access(this.dataFile);
+    } catch {
+      await this.writeAtomically({ voices: [] });
+    }
+    this.initialized = true;
+  }
+
+  private async readData(): Promise<VoiceStoreFile> {
+    await this.ensureInitialized();
+    const raw = await fs.readFile(this.dataFile, 'utf-8');
+    const parsed = JSON.parse(raw) as VoiceStoreFile;
+    return { voices: Array.isArray(parsed?.voices) ? parsed.voices : [] };
+  }
+
+  private async writeAtomically(data: VoiceStoreFile): Promise<void> {
+    const tmpFile = `${this.dataFile}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
+    await fs.rename(tmpFile, this.dataFile);
+  }
+
+  private enqueueWrite<T>(
+    fn: (data: VoiceStoreFile) => Promise<{ data: VoiceStoreFile; result: T }> | { data: VoiceStoreFile; result: T }
+  ): Promise<T> {
+    const run = this.writeQueue.then(async () => {
+      const current = await this.readData();
+      const { data, result } = await fn(current);
+      await this.writeAtomically(data);
+      return result;
+    });
+    this.writeQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  async listVoices(): Promise<VoiceProfile[]> {
+    const data = await this.readData();
+    return data.voices;
+  }
+
+  async getVoice(voiceId: string): Promise<VoiceProfile | null> {
+    const data = await this.readData();
+    return data.voices.find((v) => v.voice_id === voiceId) || null;
+  }
+
+  async createClonedVoice(params: {
+    name: string;
+    description?: string;
+    sampleUrl?: string;
+    sampleMimeType?: string;
+    traits: VoiceTraits;
+  }): Promise<VoiceProfile> {
+    const voice: VoiceProfile = {
+      voice_id: `native-${crypto.randomUUID().slice(0, 8)}`,
+      name: params.name.trim(),
+      category: 'cloned-native',
+      source: 'native',
+      labels: {
+        tone: params.traits.tone,
+        pitch: params.traits.pitch,
+        cadence: params.traits.cadence,
+        warmth: `${params.traits.warmth}%`,
+      },
+      description:
+        params.description?.trim() ||
+        `Native cloned voice (${params.traits.tone}, ${params.traits.pitch} pitch, ${params.traits.cadence} cadence).`,
+      sampleUrl: params.sampleUrl,
+      sampleMimeType: params.sampleMimeType,
+      traits: params.traits,
+      pushStatus: 'local',
+      createdAt: new Date().toISOString(),
+    };
+
+    return this.enqueueWrite((data) => {
+      data.voices.unshift(voice);
+      return { data, result: voice };
+    });
+  }
+
+  async updateVoice(
+    voiceId: string,
+    patch: Partial<VoiceProfile>
+  ): Promise<VoiceProfile | null> {
+    return this.enqueueWrite((data) => {
+      const idx = data.voices.findIndex((v) => v.voice_id === voiceId);
+      if (idx < 0) return { data, result: null };
+      const updated = { ...data.voices[idx], ...patch };
+      data.voices[idx] = updated;
+      return { data, result: updated };
+    });
+  }
+
+  async deleteVoice(voiceId: string): Promise<boolean> {
+    return this.enqueueWrite((data) => {
+      const before = data.voices.length;
+      data.voices = data.voices.filter((v) => v.voice_id !== voiceId);
+      return { data, result: data.voices.length < before };
+    });
+  }
+}

@@ -6,6 +6,8 @@ import { z } from 'zod';
 import type {
   CharacterSourceType,
   ProviderStatus,
+  TechAssetCategory,
+  VoiceTraits,
 } from '../../shared/types.js';
 import {
   ALLOWED_IMAGE_MIME_TYPES,
@@ -24,14 +26,21 @@ import {
 } from '../services/directorEngine.js';
 import {
   listElevenLabsVoices,
+  pushVoiceToElevenLabs,
   resolveElevenLabsKey,
   synthesizeElevenLabsSpeech,
 } from '../services/elevenlabs.js';
+import {
+  generateGeminiVeoScene,
+  pollGeminiVeoJobStatus,
+  resolveGeminiVeoKey,
+} from '../services/geminiVeo.js';
 import {
   generateHiggsfieldScene,
   pollHiggsfieldJobStatus,
   resolveHiggsfieldKey,
 } from '../services/higgsfield.js';
+import { retrieveRagContext } from '../services/ragContext.js';
 import {
   connectConnector,
   disconnectConnector,
@@ -40,16 +49,19 @@ import {
   testConnectorConnection,
 } from '../connectors/registry.js';
 import { generateExplainerProject } from '../services/scriptGenerator.js';
+import { AssetLibrary, validateAssetUpload } from '../store/assetLibrary.js';
 import type { CredentialVault } from '../store/credentialVault.js';
 import type { ProjectStore } from '../store/projectStore.js';
+import { ALLOWED_VOICE_AUDIO_MIMES, VoiceStore } from '../store/voiceStore.js';
 
 const GenerateProjectSchema = z.object({
   topic: z.string().min(2).max(300),
-  durationMinutes: z.number().min(2).max(30),
+  durationMinutes: z.number().min(1).max(30),
   audience: z.enum(['beginner', 'engineering', 'executive']).default('engineering'),
   title: z.string().max(160).optional(),
   primaryVoiceId: z.string().max(120).optional(),
   characterIds: z.array(z.string()).optional(),
+  assetIds: z.array(z.string()).optional(),
 });
 
 const DirectorPromptSchema = z.object({
@@ -66,6 +78,20 @@ const TtsSchema = z.object({
 const HiggsfieldSceneSchema = z.object({
   projectId: z.string().min(1),
   sceneId: z.string().min(1),
+});
+
+const PushProviderSchema = z.object({
+  provider: z.enum(['higgsfield', 'gemini_veo']),
+  projectId: z.string().min(1),
+  sceneId: z.string().min(1),
+  characterId: z.string().optional(),
+});
+
+const ConnectConnectorSchema = z.object({
+  apiKey: z.string().trim().min(1, 'API key or Key ID is required').max(512),
+  apiSecret: z.string().trim().max(512).optional(),
+  endpoint: z.string().trim().max(512).optional(),
+  model: z.string().trim().max(160).optional(),
 });
 
 const UpdateSceneSchema = z.object({
@@ -88,6 +114,8 @@ const UpdateSceneSchema = z.object({
   characterId: z.string().optional().nullable(),
   characterPlacement: z.enum(['left', 'center', 'right', 'split', 'offscreen']).optional(),
   voiceId: z.string().min(1).max(120).optional(),
+  assetIds: z.array(z.string()).optional(),
+  activeVideoProvider: z.enum(['higgsfield', 'gemini_veo']).optional().nullable(),
 });
 
 const AddMusicSchema = z.object({
@@ -101,11 +129,10 @@ const AddMusicSchema = z.object({
   accentColor: z.string().max(20).optional(),
 });
 
-const ConnectConnectorSchema = z.object({
-  apiKey: z.string().trim().min(1, 'API key or Key ID is required').max(512),
-  apiSecret: z.string().trim().max(512).optional(),
-  endpoint: z.string().trim().max(512).optional(),
-  model: z.string().trim().max(160).optional(),
+const RagRetrieveSchema = z.object({
+  query: z.string().min(1).max(1000),
+  projectId: z.string().optional(),
+  limit: z.number().min(1).max(12).optional(),
 });
 
 function getHeaderKey(req: Request, name: string): string | undefined {
@@ -121,6 +148,9 @@ function buildConnectorContext(req: Request, vault?: CredentialVault) {
     'x-higgsfield-secret': getHeaderKey(req, 'x-higgsfield-secret'),
     'x-higgsfield-endpoint': getHeaderKey(req, 'x-higgsfield-endpoint'),
     'x-higgsfield-model': getHeaderKey(req, 'x-higgsfield-model'),
+    'x-gemini-veo-key': getHeaderKey(req, 'x-gemini-veo-key'),
+    'x-gemini-veo-endpoint': getHeaderKey(req, 'x-gemini-veo-endpoint'),
+    'x-gemini-veo-model': getHeaderKey(req, 'x-gemini-veo-model'),
     'x-character-clone-key': getHeaderKey(req, 'x-character-clone-key'),
     'x-director-llm-key': getHeaderKey(req, 'x-director-llm-key'),
     'x-music-key': getHeaderKey(req, 'x-music-key'),
@@ -135,8 +165,16 @@ function buildConnectorContext(req: Request, vault?: CredentialVault) {
   return { headers, demoDisabledIds, vault };
 }
 
-export function createApiRouter(store: ProjectStore, vault?: CredentialVault): express.Router {
+export function createApiRouter(
+  store: ProjectStore,
+  vault?: CredentialVault,
+  voiceStoreArg?: VoiceStore,
+  assetLibraryArg?: AssetLibrary
+): express.Router {
   const router = express.Router();
+  const baseDataDir = path.dirname(store.getUploadsDir());
+  const voiceStore = voiceStoreArg || new VoiceStore(baseDataDir);
+  const assetLibrary = assetLibraryArg || new AssetLibrary(baseDataDir);
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -169,6 +207,65 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
     },
   });
 
+  const voiceUpload = multer({
+    storage: multer.diskStorage({
+      destination: async (_req, _file, cb) => {
+        try {
+          await voiceStore.ensureInitialized();
+          cb(null, voiceStore.getVoicesUploadDir());
+        } catch (err) {
+          cb(err as Error, '');
+        }
+      },
+      filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '') || '.wav';
+        cb(null, `voice-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${ext}`);
+      },
+    }),
+    limits: {
+      fileSize: MAX_FILE_BYTES,
+      files: 1,
+    },
+    fileFilter: (_req, file, cb) => {
+      if (ALLOWED_VOICE_AUDIO_MIMES.has(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error(`Unsupported voice sample type "${file.mimetype}".`));
+      }
+    },
+  });
+
+  const assetUpload = multer({
+    storage: multer.diskStorage({
+      destination: async (_req, _file, cb) => {
+        try {
+          await assetLibrary.ensureInitialized();
+          cb(null, assetLibrary.getAssetsUploadDir());
+        } catch (err) {
+          cb(err as Error, '');
+        }
+      },
+      filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '') || '.bin';
+        cb(null, `asset-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${ext}`);
+      },
+    }),
+    limits: {
+      fileSize: MAX_FILE_BYTES,
+      files: 6,
+    },
+    fileFilter: (_req, file, cb) => {
+      if (
+        ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype) ||
+        ALLOWED_VIDEO_MIME_TYPES.has(file.mimetype)
+      ) {
+        cb(null, true);
+      } else {
+        cb(new Error(`Unsupported asset file type "${file.mimetype}".`));
+      }
+    },
+  });
+
   // Health & Provider status (never leaks secrets)
   router.get('/health', (_req, res) => {
     res.json({ ok: true, timestamp: new Date().toISOString() });
@@ -181,6 +278,10 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
       sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
       sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
     });
+    const veo = resolveGeminiVeoKey(getHeaderKey(req, 'x-gemini-veo-key'), vault, {
+      sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+      sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+    });
     const status: ProviderStatus = {
       elevenlabs: {
         configured: Boolean(el.key),
@@ -190,11 +291,15 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         configured: Boolean(hf.key),
         source: hf.source,
       },
+      gemini_veo: {
+        configured: Boolean(veo.key),
+        source: veo.source,
+      },
     };
     res.json(status);
   });
 
-  // Dedicated 5-slot API Connectors Registry
+  // Dedicated 6-slot API Connectors Registry
   router.get('/connectors', (req, res) => {
     const connectors = listConnectors(buildConnectorContext(req, vault));
     res.json({ connectors });
@@ -260,7 +365,7 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
     }
   });
 
-  // Projects CRUD & Generation
+  // Projects CRUD & Generation (1–30 minutes + RAG Asset grounding)
   router.get('/projects', async (_req, res, next) => {
     try {
       const projects = await store.listProjects();
@@ -291,7 +396,10 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         return;
       }
 
-      const allChars = await store.listCharacters();
+      const [allChars, allAssets] = await Promise.all([
+        store.listCharacters(),
+        assetLibrary.listAssets(),
+      ]);
       const selectedChars =
         parsed.data.characterIds && parsed.data.characterIds.length > 0
           ? allChars.filter((c) => parsed.data.characterIds!.includes(c.id))
@@ -304,6 +412,8 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         title: parsed.data.title,
         primaryVoiceId: parsed.data.primaryVoiceId,
         characters: selectedChars.length > 0 ? selectedChars : PRESET_CHARACTERS,
+        assets: allAssets,
+        preferredAssetIds: parsed.data.assetIds,
       });
 
       const saved = await store.saveProject(project);
@@ -359,9 +469,32 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
       if (updates.characterId !== undefined) scene.characterId = updates.characterId || undefined;
       if (updates.characterPlacement !== undefined) scene.characterPlacement = updates.characterPlacement;
       if (updates.voiceId !== undefined) scene.voiceId = updates.voiceId;
+      if (updates.activeVideoProvider !== undefined) {
+        scene.activeVideoProvider = updates.activeVideoProvider || undefined;
+      }
+      if (updates.assetIds !== undefined) {
+        scene.assetIds = updates.assetIds;
+        const allAssets = await assetLibrary.listAssets();
+        const attachedAssets = allAssets.filter((a) => updates.assetIds!.includes(a.id));
+        const existingNonAsset = (scene.ragContext || []).filter((r) => r.sourceType !== 'asset');
+        scene.ragContext = [
+          ...attachedAssets.map((a) => ({
+            sourceType: 'asset' as const,
+            id: a.id,
+            name: a.name,
+            category: a.category,
+            score: 10,
+            matchedTerms: ['attached'],
+            snippet: a.technicalSpecs || a.description,
+            mediaUrl: a.mediaUrls[0],
+            mediaType: (a.sourceType === 'video' ? 'video' : 'image') as 'image' | 'video',
+          })),
+          ...existingNonAsset,
+        ];
+      }
 
       const totalSec = project.scenes.reduce((acc, sc) => acc + sc.durationSec, 0);
-      project.targetDurationMinutes = Math.max(2, Math.min(30, Math.round(totalSec / 60)));
+      project.targetDurationMinutes = Math.max(1, Math.min(30, Math.round(totalSec / 60)));
 
       project.history.push({
         id: `hist-${crypto.randomUUID().slice(0, 6)}`,
@@ -432,7 +565,7 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
     }
   });
 
-  // Director Prompt iterative editing + Undo / Redo / Restore
+  // Director Prompt iterative editing + RAG retrieval + Provider push + Undo / Redo / Restore
   router.post('/projects/:id/director', async (req, res, next) => {
     try {
       const parsed = DirectorPromptSchema.safeParse(req.body);
@@ -446,7 +579,8 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         return;
       }
 
-      const result = applyDirectorPrompt(project, parsed.data.prompt);
+      const allAssets = await assetLibrary.listAssets();
+      const result = applyDirectorPrompt(project, parsed.data.prompt, allAssets);
 
       if (result.higgsfieldTargetSceneIds && result.higgsfieldTargetSceneIds.length > 0) {
         const hfKey = resolveHiggsfieldKey(getHeaderKey(req, 'x-higgsfield-key'), vault, {
@@ -459,9 +593,11 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
             const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
             if (!targetScene) continue;
             const char = result.project.characters.find((c) => c.id === targetScene.characterId);
+            const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
             const jobState = await generateHiggsfieldScene({
               scene: targetScene,
               character: char,
+              assets: attachedAssets,
               sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
               sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
               sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
@@ -469,8 +605,40 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
               vault,
             });
             targetScene.higgsfield = jobState;
+            targetScene.activeVideoProvider = 'higgsfield';
             result.actions.push(
               `Submitted Higgsfield render (${jobState.status}) for "${targetScene.title}"`
+            );
+          }
+          result.summary = result.actions.join('; ');
+        }
+      }
+
+      if (result.veoTargetSceneIds && result.veoTargetSceneIds.length > 0) {
+        const veoKey = resolveGeminiVeoKey(getHeaderKey(req, 'x-gemini-veo-key'), vault, {
+          sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+          sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+        });
+        if (veoKey.key) {
+          for (const targetSceneId of result.veoTargetSceneIds) {
+            const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
+            if (!targetScene) continue;
+            const char = result.project.characters.find((c) => c.id === targetScene.characterId);
+            const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
+            const jobState = await generateGeminiVeoScene({
+              scene: targetScene,
+              character: char,
+              assets: attachedAssets,
+              uploadsRootDir: store.getUploadsDir(),
+              sessionHeaderKey: getHeaderKey(req, 'x-gemini-veo-key'),
+              sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+              sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+              vault,
+            });
+            targetScene.veo = jobState;
+            targetScene.activeVideoProvider = 'gemini_veo';
+            result.actions.push(
+              `Pushed to Gemini Veo (${jobState.status}) for "${targetScene.title}"`
             );
           }
           result.summary = result.actions.join('; ');
@@ -482,7 +650,9 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         project: saved,
         summary: result.summary,
         actions: result.actions,
+        ragContextUsed: result.ragContextUsed,
         higgsfieldTargetSceneIds: result.higgsfieldTargetSceneIds,
+        veoTargetSceneIds: result.veoTargetSceneIds,
       });
     } catch (err) {
       next(err);
@@ -628,10 +798,14 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
     }
   );
 
-  // ElevenLabs Voice Import & TTS (/api/voices, /api/tts, plus /v1 mirror endpoints)
+  // Native Voice Cloning, Listing, TTS & Optional ElevenLabs Push
   const handleListVoices = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await listElevenLabsVoices(getHeaderKey(req, 'x-elevenlabs-key'), vault);
+      const result = await listElevenLabsVoices(
+        getHeaderKey(req, 'x-elevenlabs-key'),
+        vault,
+        voiceStore
+      );
       res.json(result);
     } catch (err) {
       next(err);
@@ -640,6 +814,113 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
 
   router.get('/voices', handleListVoices);
   router.get('/v1/voices', handleListVoices);
+
+  router.post(
+    '/voices/clone',
+    (req, res, next) => {
+      voiceUpload.single('sample')(req, res, (err) => {
+        if (err) {
+          res.status(400).json({ error: err.message || 'Voice sample upload failed.' });
+          return;
+        }
+        next();
+      });
+    },
+    async (req, res, next) => {
+      try {
+        const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+        if (name.length < 2) {
+          res.status(400).json({ error: 'Voice name must be at least 2 characters.' });
+          return;
+        }
+
+        let rawTraits: Partial<VoiceTraits> = {};
+        if (typeof req.body?.traits === 'string' && req.body.traits.trim()) {
+          try {
+            rawTraits = JSON.parse(req.body.traits) as Partial<VoiceTraits>;
+          } catch {
+            rawTraits = {};
+          }
+        }
+
+        const traits: VoiceTraits = {
+          tone:
+            (typeof req.body?.tone === 'string' && req.body.tone.trim()) ||
+            rawTraits.tone ||
+            'Warm & Articulate',
+          pitch:
+            req.body?.pitch === 'low' || req.body?.pitch === 'high' || req.body?.pitch === 'medium'
+              ? req.body.pitch
+              : rawTraits.pitch === 'low' || rawTraits.pitch === 'high'
+                ? rawTraits.pitch
+                : 'medium',
+          warmth: Math.max(
+            0,
+            Math.min(100, Number(req.body?.warmth ?? rawTraits.warmth ?? 70) || 70)
+          ),
+          cadence:
+            req.body?.cadence === 'measured' ||
+            req.body?.cadence === 'brisk' ||
+            req.body?.cadence === 'conversational'
+              ? req.body.cadence
+              : rawTraits.cadence === 'measured' || rawTraits.cadence === 'brisk'
+                ? rawTraits.cadence
+                : 'conversational',
+        };
+
+        const file = req.file as Express.Multer.File | undefined;
+        const sampleUrl = file ? `/uploads/voices/${path.basename(file.path)}` : undefined;
+        const description =
+          typeof req.body?.description === 'string' ? req.body.description : undefined;
+
+        const voice = await voiceStore.createClonedVoice({
+          name,
+          description,
+          sampleUrl,
+          sampleMimeType: file?.mimetype,
+          traits,
+        });
+
+        res.status(201).json({ voice });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  router.delete('/voices/:id', async (req, res, next) => {
+    try {
+      const deleted = await voiceStore.deleteVoice(req.params.id);
+      if (!deleted) {
+        res.status(404).json({ error: 'Custom voice not found.' });
+        return;
+      }
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/voices/:id/push-elevenlabs', async (req, res, next) => {
+    try {
+      const voice = await voiceStore.getVoice(req.params.id);
+      if (!voice) {
+        res.status(404).json({ error: 'Custom voice not found.' });
+        return;
+      }
+
+      const result = await pushVoiceToElevenLabs({
+        voice,
+        uploadsRootDir: store.getUploadsDir(),
+        sessionHeaderKey: getHeaderKey(req, 'x-elevenlabs-key'),
+        vault,
+        voiceStore,
+      });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   const handleTts = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -659,6 +940,7 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         text: parsed.data.text,
         sessionHeaderKey: getHeaderKey(req, 'x-elevenlabs-key'),
         vault,
+        voiceStore,
       });
 
       if (parsed.data.projectId && parsed.data.sceneId) {
@@ -667,7 +949,10 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
           const sc = project.scenes.find((s) => s.id === parsed.data.sceneId);
           if (sc) {
             sc.voiceId = parsed.data.voiceId;
-            sc.voiceStatus = result.source === 'elevenlabs' ? 'synthesized' : 'fallback';
+            sc.voiceStatus =
+              result.source === 'elevenlabs' || result.source === 'native'
+                ? 'synthesized'
+                : 'fallback';
             await store.saveProject(project);
           }
         }
@@ -686,6 +971,134 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
 
   router.post('/tts', handleTts);
   router.post('/v1/text-to-speech/:voiceId', handleTts);
+
+  // Tech Asset Library & RAG Context Engine
+  router.get('/assets', async (_req, res, next) => {
+    try {
+      const assets = await assetLibrary.listAssets();
+      res.json({ assets });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    '/assets',
+    (req, res, next) => {
+      assetUpload.array('media', 6)(req, res, (err) => {
+        if (err) {
+          res.status(400).json({ error: err.message || 'Asset upload failed.' });
+          return;
+        }
+        next();
+      });
+    },
+    async (req, res, next) => {
+      try {
+        const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+        if (name.length < 2) {
+          res.status(400).json({ error: 'Asset name must be at least 2 characters.' });
+          return;
+        }
+
+        const categoryRaw = typeof req.body?.category === 'string' ? req.body.category : 'hardware';
+        const validCategories = new Set<TechAssetCategory>([
+          'hardware',
+          'server-rack',
+          'architecture-diagram',
+          'lab-environment',
+          'product-demo',
+          'reference-clip',
+        ]);
+        const category: TechAssetCategory = validCategories.has(categoryRaw as TechAssetCategory)
+          ? (categoryRaw as TechAssetCategory)
+          : 'hardware';
+
+        const files = ((req.files as Express.Multer.File[]) || []).map((f) => ({
+          originalname: f.originalname,
+          mimetype: f.mimetype,
+          size: f.size,
+          url: `/uploads/assets/${path.basename(f.path)}`,
+        }));
+
+        const requestedSource =
+          req.body?.sourceType === 'video'
+            ? 'video'
+            : req.body?.sourceType === 'photos'
+              ? 'photos'
+              : undefined;
+        const validation = validateAssetUpload(files, requestedSource);
+        if (!validation.valid) {
+          res.status(400).json({ error: validation.error });
+          return;
+        }
+
+        const description =
+          typeof req.body?.description === 'string' && req.body.description.trim()
+            ? req.body.description
+            : `${name} reference media for technical explainer scenes.`;
+        const technicalSpecs =
+          typeof req.body?.technicalSpecs === 'string' ? req.body.technicalSpecs : '';
+        const tagsRaw: string = typeof req.body?.tags === 'string' ? req.body.tags : '';
+        const tags = tagsRaw
+          .split(',')
+          .map((t: string) => t.trim())
+          .filter(Boolean);
+
+        const asset = await assetLibrary.addAsset({
+          name,
+          category,
+          sourceType: validation.sourceType,
+          mediaUrls: files.map((f) => f.url),
+          description,
+          technicalSpecs,
+          tags: tags.length > 0 ? tags : name.toLowerCase().split(/\s+/).slice(0, 5),
+        });
+
+        res.status(201).json({ asset });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  router.delete('/assets/:id', async (req, res, next) => {
+    try {
+      const deleted = await assetLibrary.deleteAsset(req.params.id);
+      if (!deleted) {
+        res.status(404).json({ error: 'Tech asset not found.' });
+        return;
+      }
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/assets/retrieve', async (req, res, next) => {
+    try {
+      const parsed = RagRetrieveSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid RAG query.' });
+        return;
+      }
+      const [assets, characters, project] = await Promise.all([
+        assetLibrary.listAssets(),
+        store.listCharacters(),
+        parsed.data.projectId ? store.getProject(parsed.data.projectId) : Promise.resolve(null),
+      ]);
+      const matches = retrieveRagContext({
+        query: parsed.data.query,
+        assets,
+        characters: project ? project.characters : characters,
+        scenes: project?.scenes,
+        limit: parsed.data.limit ?? 5,
+      });
+      res.json({ matches });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // Higgsfield Cinematic Scene generation & job status polling
   router.post('/higgsfield/generate', async (req, res, next) => {
@@ -706,9 +1119,13 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
         return;
       }
       const character = project.characters.find((c) => c.id === scene.characterId);
+      const allAssets = await assetLibrary.listAssets();
+      const attachedAssets = allAssets.filter((a) => scene.assetIds?.includes(a.id));
+
       const jobState = await generateHiggsfieldScene({
         scene,
         character,
+        assets: attachedAssets,
         sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
         sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
         sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
@@ -717,6 +1134,7 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
       });
 
       scene.higgsfield = jobState;
+      scene.activeVideoProvider = 'higgsfield';
       const saved = await store.saveProject(project);
       res.json({ project: saved, higgsfield: jobState });
     } catch (err) {
@@ -749,6 +1167,119 @@ export function createApiRouter(store: ProjectStore, vault?: CredentialVault): e
       scene.higgsfield = jobState;
       const saved = await store.saveProject(project);
       res.json({ project: saved, higgsfield: jobState });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Unified Advanced Push-Out (Higgsfield & Gemini Veo) with Reference Photos/Videos & RAG Assets
+  router.post('/providers/push', async (req, res, next) => {
+    try {
+      const parsed = PushProviderSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid provider push request.', details: parsed.error.flatten() });
+        return;
+      }
+      const project = await store.getProject(parsed.data.projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const scene = project.scenes.find((s) => s.id === parsed.data.sceneId);
+      if (!scene) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+
+      const targetCharId = parsed.data.characterId || scene.characterId;
+      const character = project.characters.find((c) => c.id === targetCharId);
+      const allAssets = await assetLibrary.listAssets();
+      const attachedAssets = allAssets.filter((a) => scene.assetIds?.includes(a.id));
+
+      if (parsed.data.provider === 'gemini_veo') {
+        const job = await generateGeminiVeoScene({
+          scene,
+          character,
+          assets: attachedAssets,
+          uploadsRootDir: store.getUploadsDir(),
+          sessionHeaderKey: getHeaderKey(req, 'x-gemini-veo-key'),
+          sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+          sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+          vault,
+        });
+        scene.veo = job;
+        scene.activeVideoProvider = 'gemini_veo';
+        const saved = await store.saveProject(project);
+        res.json({ project: saved, job, provider: 'gemini_veo' });
+        return;
+      }
+
+      const job = await generateHiggsfieldScene({
+        scene,
+        character,
+        assets: attachedAssets,
+        sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+        sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+        sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+        sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+        vault,
+      });
+      scene.higgsfield = job;
+      scene.activeVideoProvider = 'higgsfield';
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, job, provider: 'higgsfield' });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/providers/jobs/:projectId/:sceneId/:provider', async (req, res, next) => {
+    try {
+      const provider = req.params.provider;
+      if (provider !== 'higgsfield' && provider !== 'gemini_veo') {
+        res.status(400).json({ error: `Unsupported video provider "${provider}".` });
+        return;
+      }
+      const project = await store.getProject(req.params.projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const scene = project.scenes.find((s) => s.id === req.params.sceneId);
+      if (!scene) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+
+      if (provider === 'gemini_veo') {
+        if (!scene.veo) {
+          res.status(404).json({ error: 'No Gemini Veo job found for scene.' });
+          return;
+        }
+        const job = await pollGeminiVeoJobStatus({
+          job: scene.veo,
+          sessionHeaderKey: getHeaderKey(req, 'x-gemini-veo-key'),
+          sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+          sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+          vault,
+        });
+        scene.veo = job;
+        const saved = await store.saveProject(project);
+        res.json({ project: saved, job, provider: 'gemini_veo' });
+        return;
+      }
+
+      const job = await pollHiggsfieldJobStatus({
+        scene,
+        sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+        sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+        sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+        sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+        vault,
+      });
+      scene.higgsfield = job;
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, job, provider: 'higgsfield' });
     } catch (err) {
       next(err);
     }

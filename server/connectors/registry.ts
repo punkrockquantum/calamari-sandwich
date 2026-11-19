@@ -18,6 +18,11 @@ import {
   DEFAULT_HIGGSFIELD_MODEL,
   verifyHiggsfieldCredentials,
 } from '../services/higgsfield.js';
+import {
+  DEFAULT_GEMINI_VEO_ENDPOINT,
+  DEFAULT_GEMINI_VEO_MODEL,
+  verifyGeminiVeoCredentials,
+} from '../services/geminiVeo.js';
 import { maskCredential, type CredentialVault } from '../store/credentialVault.js';
 
 export interface ConnectorProbeResult {
@@ -107,6 +112,31 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     verifyDemo: () => ({
       ok: true,
       message: 'Demo Mode active: real-time 16:9 Canvas camera motion & diagram renderer ready.',
+      details: { renderer: 'canvas-2d', aspectRatio: '16:9' },
+    }),
+  },
+  {
+    id: 'gemini_veo',
+    name: 'Gemini Veo Cinema',
+    category: 'AI Video & Motion Generation',
+    description:
+      'Pushes grounded 16:9 scene renders with attached character & tech asset references to Google Gemini Veo.',
+    envVar: 'GEMINI_API_KEY',
+    fallbackEnvVars: ['GOOGLE_API_KEY'],
+    sessionHeader: 'x-gemini-veo-key',
+    sessionEndpointHeader: 'x-gemini-veo-endpoint',
+    sessionModelHeader: 'x-gemini-veo-model',
+    endpointEnvVar: 'GEMINI_VEO_API_URL',
+    defaultEndpoint: DEFAULT_GEMINI_VEO_ENDPOINT,
+    defaultModel: DEFAULT_GEMINI_VEO_MODEL,
+    portalUrl: 'https://aistudio.google.com/apikey',
+    portalLabel: 'Open Google AI Studio API Keys',
+    capabilities: ['Veo 2.0 / 3.0 Video Push', 'Image-to-Video Reference Grounding', '60fps Canvas Fallback'],
+    testLive: async ({ apiKey, endpoint, model }) =>
+      verifyGeminiVeoCredentials({ apiKey, endpoint, model }),
+    verifyDemo: () => ({
+      ok: true,
+      message: 'Demo Mode active: native 16:9 Canvas stage & RAG asset renderer ready.',
       details: { renderer: 'canvas-2d', aspectRatio: '16:9' },
     }),
   },

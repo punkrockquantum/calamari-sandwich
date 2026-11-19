@@ -189,13 +189,14 @@ describe('Explainer Studio Full-Stack API & Core Services', () => {
     ).toBe(true);
   });
 
-  it('exposes all 5 API Connectors with Demo Mode, Connected, Not Configured statuses & live Test Connection', async () => {
-    // 1. Default Demo Mode across all 5 connectors
+  it('exposes all 6 API Connectors with Demo Mode, Connected, Not Configured statuses & live Test Connection', async () => {
+    // 1. Default Demo Mode across all 6 connectors
     const listRes = await request(app).get('/api/connectors').expect(200);
-    expect(listRes.body.connectors).toHaveLength(5);
+    expect(listRes.body.connectors).toHaveLength(6);
     expect(listRes.body.connectors.map((c: { id: string }) => c.id)).toEqual([
       'elevenlabs',
       'higgsfield',
+      'gemini_veo',
       'character_cloning',
       'script_director_llm',
       'music_soundtrack',

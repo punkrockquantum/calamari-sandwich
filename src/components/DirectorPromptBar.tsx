@@ -1,23 +1,25 @@
 import { useState } from 'react';
-import { ArrowRight, Loader2, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowRight, Database, Loader2, Sparkles, Wand2 } from 'lucide-react';
+import type { RagContextMatch } from '@shared/types';
 
 interface DirectorPromptBarProps {
   onSubmitPrompt: (prompt: string) => Promise<void>;
   lastActionSummary: string | null;
+  lastRagContext?: RagContextMatch[];
   busy: boolean;
 }
 
 const SUGGESTIONS = [
-  'Add a new scene explaining KV cache compression with Neon Lab and Orbital Pan',
+  'Add a new scene explaining H100 server rack cooling with Neon Lab and Orbital Pan',
   'Add character "Maya Chen" as an ML Engineer at center stage',
   'Add synthwave soundtrack "Midnight Pulse" at -14dB',
-  'Set scene 2 camera motion to Rack Focus and transition to Whip Pan',
-  'Rewrite scene 1 narration to be simpler with an analogy',
+  'Make it 1 minute with crisp visual metaphors',
 ];
 
 export function DirectorPromptBar({
   onSubmitPrompt,
   lastActionSummary,
+  lastRagContext,
   busy,
 }: DirectorPromptBarProps) {
   const [prompt, setPrompt] = useState('');
@@ -41,7 +43,7 @@ export function DirectorPromptBar({
           type="text"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder='Director Prompt: e.g. "Add a scene on GPU tensor cores with Orbital Pan" or "Add synthwave soundtrack at -14dB"'
+          placeholder='Director Prompt: e.g. "Add a scene on H100 server rack cooling" or "Push scene 1 to Gemini Veo"'
           className="flex-1 bg-zinc-950/90 border border-zinc-800 focus:border-indigo-500 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
         />
 
@@ -58,7 +60,7 @@ export function DirectorPromptBar({
 
       <div className="mt-2 flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
-          {SUGGESTIONS.slice(0, 4).map((s) => (
+          {SUGGESTIONS.map((s) => (
             <button
               key={s}
               type="button"
@@ -75,6 +77,25 @@ export function DirectorPromptBar({
           </div>
         )}
       </div>
+
+      {lastRagContext && lastRagContext.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-zinc-800/80 flex items-center gap-1.5 flex-wrap">
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-indigo-300">
+            <Database className="w-3 h-3" />
+            RAG Context Used:
+          </span>
+          {lastRagContext.map((m) => (
+            <span
+              key={`${m.sourceType}-${m.id}`}
+              title={m.snippet}
+              className="inline-flex items-center gap-1 rounded-md border border-indigo-500/35 bg-indigo-500/10 px-2 py-0.5 text-[10px] text-indigo-200"
+            >
+              <span className="opacity-70 uppercase text-[9px]">{m.sourceType}</span>
+              <span>{m.name}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

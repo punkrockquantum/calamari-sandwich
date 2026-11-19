@@ -5,6 +5,7 @@ import type {
   ConnectorAccountInfo,
   HiggsfieldJobState,
   SceneItem,
+  TechAsset,
 } from '../../shared/types.js';
 import {
   formatHiggsfieldAuth,
@@ -246,6 +247,7 @@ function buildDefaultStatusUrl(endpoint: string, jobId: string): string {
 export async function generateHiggsfieldScene(params: {
   scene: SceneItem;
   character?: CharacterProfile;
+  assets?: TechAsset[];
   sessionHeaderKey?: string;
   sessionSecret?: string;
   sessionEndpoint?: string;
@@ -259,11 +261,22 @@ export async function generateHiggsfieldScene(params: {
   });
   const now = new Date().toISOString();
 
+  const attachedMediaUrls = Array.from(
+    new Set([
+      ...(params.character?.mediaUrls || []),
+      ...(params.assets || []).flatMap((a) => a.mediaUrls),
+      ...(params.scene.ragContext || [])
+        .map((r) => r.mediaUrl)
+        .filter((u): u is string => Boolean(u)),
+    ])
+  );
+
   if (!resolved.key) {
     return {
       status: 'fallback',
       provider: 'canvas-fallback',
       jobId: `hf-sim-${crypto.randomUUID().slice(0, 8)}`,
+      attachedMediaUrls,
       renderNote: `Canvas Stage Fallback (${params.scene.cameraMotion} • ${params.scene.cinematicStyle}). Connect Higgsfield for cloud video generation.`,
       updatedAt: now,
     };
@@ -282,8 +295,16 @@ export async function generateHiggsfieldScene(params: {
           name: params.character.name,
           placement: params.scene.characterPlacement,
           traits: params.character.traits,
+          media_urls: params.character.mediaUrls,
         }
       : undefined,
+    reference_assets: (params.assets || []).map((a) => ({
+      id: a.id,
+      name: a.name,
+      category: a.category,
+      technical_specs: a.technicalSpecs,
+      media_urls: a.mediaUrls,
+    })),
   };
 
   try {
@@ -348,6 +369,7 @@ export async function generateHiggsfieldScene(params: {
       videoUrl,
       endpoint: resolved.endpoint,
       model: resolved.model,
+      attachedMediaUrls,
       renderNote:
         status === 'ready'
           ? `Higgsfield video ready (${resolved.model}).`
