@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Clock, Loader2, Mic, Sparkles, X } from 'lucide-react';
-import type { AudienceLevel, GenerateProjectRequest, VoiceProfile } from '@shared/types';
+import { BookOpen, Check, Clock, Loader2, Mic, Sparkles, X } from 'lucide-react';
+import type { AudienceLevel, GenerateProjectRequest, ImportedSource, VoiceProfile } from '@shared/types';
 
 interface TopicGeneratorModalProps {
   open: boolean;
   voices: VoiceProfile[];
+  sources?: ImportedSource[];
   activeVoiceId?: string;
   onClose: () => void;
   onGenerate: (payload: GenerateProjectRequest) => Promise<void>;
+  onOpenSourceImport?: () => void;
   busy: boolean;
 }
 
@@ -23,14 +25,17 @@ const SAMPLE_TOPICS = [
 export function TopicGeneratorModal({
   open,
   voices,
+  sources = [],
   activeVoiceId,
   onClose,
   onGenerate,
+  onOpenSourceImport,
   busy,
 }: TopicGeneratorModalProps) {
   const [topic, setTopic] = useState(SAMPLE_TOPICS[0]);
   const [durationMinutes, setDurationMinutes] = useState(2);
   const [audience, setAudience] = useState<AudienceLevel>('engineering');
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [primaryVoiceId, setPrimaryVoiceId] = useState(
     activeVoiceId || voices[0]?.voice_id || 'mock-rachel'
   );
@@ -47,6 +52,12 @@ export function TopicGeneratorModal({
   }, [open, activeVoiceId, voices]);
 
   if (!open) return null;
+
+  const toggleSource = (id: string) => {
+    setSelectedSourceIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
 
   const estimatedChapters =
     durationMinutes === 1
@@ -69,6 +80,8 @@ export function TopicGeneratorModal({
       durationMinutes,
       audience,
       primaryVoiceId,
+      sourceIds: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
+      autoGenerateVisuals: true,
     });
     onClose();
   };
@@ -202,6 +215,55 @@ export function TopicGeneratorModal({
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
+                Ground in PPTX / NotebookLM Sources ({selectedSourceIds.length})
+              </label>
+              {onOpenSourceImport && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenSourceImport();
+                  }}
+                  className="text-[11px] text-cyan-300 hover:underline"
+                >
+                  + Import PPTX / NotebookLM
+                </button>
+              )}
+            </div>
+            {sources.length === 0 ? (
+              <p className="text-[11px] text-zinc-500">
+                No PPTX decks or NotebookLM notes imported yet — scenes will map 1-to-1 to your prompt above.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                {sources.map((src) => {
+                  const selected = selectedSourceIds.includes(src.id);
+                  return (
+                    <button
+                      key={src.id}
+                      type="button"
+                      onClick={() => toggleSource(src.id)}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] transition ${
+                        selected
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-100'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                      }`}
+                    >
+                      {selected && <Check className="w-3 h-3 text-cyan-300" />}
+                      <span className="uppercase text-[9px] opacity-70">{src.sourceType}</span>
+                      <span className="truncate max-w-[180px]">{src.name}</span>
+                      <span className="text-[9px] opacity-65">({src.slides.length})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="pt-2 flex items-center justify-end gap-2">

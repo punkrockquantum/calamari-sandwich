@@ -49,10 +49,17 @@ import {
   listConnectors,
   testConnectorConnection,
 } from '../connectors/registry.js';
+import { generateNativeVisualAsset } from '../services/nativeVisualGenerator.js';
 import { generateExplainerProject } from '../services/scriptGenerator.js';
+import {
+  parseAndImportNotebookLm,
+  parseAndImportPptx,
+} from '../services/sourceImporter.js';
+import { analyzeVoiceSampleFile, deriveFallbackAcousticSignature } from '../services/voiceDsp.js';
 import { AssetLibrary, validateAssetUpload } from '../store/assetLibrary.js';
 import type { CredentialVault } from '../store/credentialVault.js';
 import type { ProjectStore } from '../store/projectStore.js';
+import { SourceStore } from '../store/sourceStore.js';
 import {
   ALLOWED_VOICE_AUDIO_MIMES,
   VoiceStore,
@@ -69,6 +76,27 @@ const GenerateProjectSchema = z.object({
   primaryVoiceId: z.string().max(120).optional(),
   characterIds: z.array(z.string()).optional(),
   assetIds: z.array(z.string()).optional(),
+  sourceIds: z.array(z.string()).optional(),
+  autoGenerateVisuals: z.boolean().optional(),
+});
+
+const PrimaryVoiceSchema = z.object({
+  voiceId: z.string().min(1).max(120),
+  applyToAllScenes: z.boolean().default(true),
+});
+
+const GenerateVisualSchema = z.object({
+  prompt: z.string().min(2).max(1500),
+  title: z.string().max(160).optional(),
+  keyPoints: z.array(z.string()).optional(),
+  style: z
+    .enum(['Neon Lab', 'Anamorphic Studio', 'Blueprint Isometric', 'Editorial Documentary', 'Quantum Noir'])
+    .optional(),
+  diagramType: z
+    .enum(['auto', 'architecture', 'flow', 'comparison', 'infographic', 'hardware'])
+    .optional(),
+  projectId: z.string().optional(),
+  sceneId: z.string().optional(),
 });
 
 const DirectorPromptSchema = z.object({
@@ -110,6 +138,18 @@ const UpdateSceneSchema = z.object({
   visualOverlay: z
     .enum(['neural-graph', 'architecture-flow', 'code-terminal', 'packet-stream', 'wave-spectrum'])
     .optional(),
+  animationPreset: z
+    .enum([
+      'diagram-flow',
+      'kinetic-cards',
+      'slide-deck-reveal',
+      'data-pulse',
+      'split-comparison',
+      'timeline-walkthrough',
+      'particle-network',
+    ])
+    .optional(),
+  generatedVisualUrl: z.string().max(500).optional().nullable(),
   cameraMotion: z
     .enum(['Slow Dolly In', 'Orbital Pan', 'Crane Pullback', 'Handheld Micro', 'Rack Focus', 'Static Tripod'])
     .optional(),
@@ -123,6 +163,8 @@ const UpdateSceneSchema = z.object({
   characterPlacement: z.enum(['left', 'center', 'right', 'split', 'offscreen']).optional(),
   voiceId: z.string().min(1).max(120).optional(),
   voicePlaybackMode: z.enum(['auto', 'speak-script', 'direct-sample']).optional(),
+  voiceAudioUrl: z.string().max(500).optional().nullable(),
+  keyPoints: z.array(z.string()).optional(),
   assetIds: z.array(z.string()).optional(),
   activeVideoProvider: z.enum(['higgsfield', 'gemini_veo']).optional().nullable(),
 });
@@ -178,12 +220,22 @@ export function createApiRouter(
   store: ProjectStore,
   vault?: CredentialVault,
   voiceStoreArg?: VoiceStore,
-  assetLibraryArg?: AssetLibrary
+  assetLibraryArg?: AssetLibrary,
+  sourceStoreArg?: SourceStore
 ): express.Router {
   const router = express.Router();
   const baseDataDir = path.dirname(store.getUploadsDir());
   const voiceStore = voiceStoreArg || new VoiceStore(baseDataDir);
   const assetLibrary = assetLibraryArg || new AssetLibrary(baseDataDir);
+  const sourceStore = sourceStoreArg || new SourceStore(baseDataDir);
+
+  const sourceMemoryUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 40 * 1024 * 1024,
+      files: 1,
+    },
+  });
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -434,9 +486,10 @@ export function createApiRouter(
         return;
       }
 
-      const [allChars, allAssets] = await Promise.all([
+      const [allChars, allAssets, selectedSources] = await Promise.all([
         store.listCharacters(),
         assetLibrary.listAssets(),
+        sourceStore.getSourcesByIds(parsed.data.sourceIds || []),
       ]);
       const customChars = allChars.filter((c) => !c.isPreset);
       const presetChars = allChars.filter((c) => c.isPreset);
@@ -455,7 +508,48 @@ export function createApiRouter(
         characters: selectedChars.length > 0 ? selectedChars : PRESET_CHARACTERS,
         assets: allAssets,
         preferredAssetIds: parsed.data.assetIds,
+        sources: selectedSources,
       });
+
+      // Auto-generate native prompt-exact SVG visuals for scenes
+      if (parsed.data.autoGenerateVisuals !== false) {
+        const assetMap = new Map(allAssets.map((a) => [a.id, a]));
+        for (const sc of project.scenes) {
+          const strongUploadedPhoto = (sc.ragContext || []).some((m) => {
+            if (m.sourceType !== 'asset') return false;
+            const a = assetMap.get(m.id);
+            const isStarter = a?.id.startsWith('asset-gpu-rack') || a?.id.startsWith('asset-kv-cache');
+            return a && a.sourceType === 'photos' && a.mediaUrls.length > 0 && (!isStarter || m.score >= 4);
+          });
+          const generated = await generateNativeVisualAsset({
+            prompt: sc.visualPrompt,
+            title: sc.title,
+            keyPoints: sc.keyPoints,
+            style: sc.cinematicStyle,
+            uploadsRootDir: store.getUploadsDir(),
+            assetLibrary,
+          });
+          sc.generatedVisualUrl = generated.visualUrl;
+          const generatedRagEntry = {
+            sourceType: 'asset' as const,
+            id: generated.asset.id,
+            name: generated.asset.name,
+            category: generated.asset.category,
+            score: 9,
+            matchedTerms: ['generated-svg'],
+            snippet: generated.asset.technicalSpecs,
+            mediaUrl: generated.visualUrl,
+            mediaType: 'image' as const,
+          };
+          if (strongUploadedPhoto) {
+            sc.assetIds = [...(sc.assetIds || []), generated.asset.id];
+            sc.ragContext = [...(sc.ragContext || []), generatedRagEntry];
+          } else {
+            sc.assetIds = [generated.asset.id, ...(sc.assetIds || [])];
+            sc.ragContext = [generatedRagEntry, ...(sc.ragContext || [])];
+          }
+        }
+      }
 
       const saved = await store.saveProject(project);
       res.status(201).json({ project: saved });
@@ -504,6 +598,10 @@ export function createApiRouter(
       if (updates.narration !== undefined) scene.narration = updates.narration;
       if (updates.visualPrompt !== undefined) scene.visualPrompt = updates.visualPrompt;
       if (updates.visualOverlay !== undefined) scene.visualOverlay = updates.visualOverlay;
+      if (updates.animationPreset !== undefined) scene.animationPreset = updates.animationPreset;
+      if (updates.generatedVisualUrl !== undefined) {
+        scene.generatedVisualUrl = updates.generatedVisualUrl || undefined;
+      }
       if (updates.cameraMotion !== undefined) scene.cameraMotion = updates.cameraMotion;
       if (updates.cinematicStyle !== undefined) scene.cinematicStyle = updates.cinematicStyle;
       if (updates.transitionIn !== undefined) scene.transitionIn = updates.transitionIn;
@@ -512,6 +610,12 @@ export function createApiRouter(
       if (updates.voiceId !== undefined) scene.voiceId = updates.voiceId;
       if (updates.voicePlaybackMode !== undefined) {
         scene.voicePlaybackMode = updates.voicePlaybackMode;
+      }
+      if (updates.voiceAudioUrl !== undefined) {
+        scene.voiceAudioUrl = updates.voiceAudioUrl || undefined;
+      }
+      if (updates.keyPoints !== undefined) {
+        scene.keyPoints = updates.keyPoints;
       }
       if (updates.activeVideoProvider !== undefined) {
         scene.activeVideoProvider = updates.activeVideoProvider || undefined;
@@ -550,6 +654,117 @@ export function createApiRouter(
       });
       project.redoStack = [];
 
+      const saved = await store.saveProject(project);
+      res.json({ project: saved, scene });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Bind project primary voice & update all scenes atomically
+  router.patch('/projects/:id/primary-voice', async (req, res, next) => {
+    try {
+      const parsed = PrimaryVoiceSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid primary voice payload.', details: parsed.error.flatten() });
+        return;
+      }
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      project.primaryVoiceId = parsed.data.voiceId;
+      if (parsed.data.applyToAllScenes) {
+        for (const sc of project.scenes) {
+          sc.voiceId = parsed.data.voiceId;
+        }
+      }
+      project.history.push({
+        id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+        timestamp: new Date().toISOString(),
+        prompt: `Set active explainer voice to ${parsed.data.voiceId}`,
+        summary: `Activated voice "${parsed.data.voiceId}" across ${parsed.data.applyToAllScenes ? 'all scenes' : 'project primary voice'}`,
+        actions: [`Activated explainer voice ${parsed.data.voiceId}`],
+        projectState: extractProjectSnapshot(project),
+      });
+      project.redoStack = [];
+      const saved = await store.saveProject(project);
+      res.json({ project: saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Per-scene Record Scene Take / Attach Recorded Audio Clip
+  router.post(
+    '/projects/:id/scenes/:sceneId/voice-take',
+    (req, res, next) => {
+      voiceUpload.fields([
+        { name: 'audio', maxCount: 1 },
+        { name: 'sample', maxCount: 1 },
+      ])(req, res, (err) => {
+        if (err) {
+          res.status(400).json({ error: err.message || 'Scene voice take upload failed.' });
+          return;
+        }
+        next();
+      });
+    },
+    async (req, res, next) => {
+      try {
+        const project = await store.getProject(req.params.id);
+        if (!project) {
+          res.status(404).json({ error: 'Project not found.' });
+          return;
+        }
+        const scene = project.scenes.find((s) => s.id === req.params.sceneId);
+        if (!scene) {
+          res.status(404).json({ error: 'Scene not found.' });
+          return;
+        }
+        const filesMap = req.files as Record<string, Express.Multer.File[]> | undefined;
+        const file = filesMap?.audio?.[0] || filesMap?.sample?.[0];
+        if (!file) {
+          res.status(400).json({ error: 'Audio clip file is required (field "audio" or "sample").' });
+          return;
+        }
+        const voiceAudioUrl = `/uploads/voices/${path.basename(file.path)}`;
+        scene.voiceAudioUrl = voiceAudioUrl;
+        scene.voicePlaybackMode = 'direct-sample';
+        scene.voiceStatus = 'synthesized';
+        project.history.push({
+          id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+          timestamp: new Date().toISOString(),
+          prompt: `Record scene take for "${scene.title}"`,
+          summary: `Attached recorded audio take to "${scene.title}"`,
+          actions: [`Attached recorded audio take to ${scene.title}`],
+          projectState: extractProjectSnapshot(project),
+        });
+        project.redoStack = [];
+        const saved = await store.saveProject(project);
+        res.status(201).json({ project: saved, scene, voiceAudioUrl });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  router.delete('/projects/:id/scenes/:sceneId/voice-take', async (req, res, next) => {
+    try {
+      const project = await store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const scene = project.scenes.find((s) => s.id === req.params.sceneId);
+      if (!scene) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+      scene.voiceAudioUrl = undefined;
+      scene.voicePlaybackMode = 'speak-script';
+      scene.voiceStatus = 'fallback';
       const saved = await store.saveProject(project);
       res.json({ project: saved, scene });
     } catch (err) {
@@ -915,6 +1130,13 @@ export function createApiRouter(
             ? 'direct-sample'
             : 'speak-script';
 
+        const acousticSignature = file
+          ? await analyzeVoiceSampleFile({
+              filePath: file.path,
+              fallbackTraits: traits,
+            })
+          : deriveFallbackAcousticSignature(traits);
+
         const voice = await voiceStore.createClonedVoice({
           name,
           description,
@@ -922,9 +1144,35 @@ export function createApiRouter(
           sampleMimeType,
           playbackMode,
           traits,
+          acousticSignature,
         });
 
-        res.status(201).json({ voice });
+        let updatedProject = null;
+        const projectId = typeof req.body?.projectId === 'string' ? req.body.projectId.trim() : '';
+        const shouldActivate =
+          req.body?.setAsActive === 'true' ||
+          req.body?.setAsActiveExplainerVoice === 'true';
+        if (projectId && shouldActivate) {
+          const proj = await store.getProject(projectId);
+          if (proj) {
+            proj.primaryVoiceId = voice.voice_id;
+            for (const sc of proj.scenes) {
+              sc.voiceId = voice.voice_id;
+            }
+            proj.history.push({
+              id: `hist-${crypto.randomUUID().slice(0, 6)}`,
+              timestamp: new Date().toISOString(),
+              prompt: `Activate cloned voice "${voice.name}"`,
+              summary: `Bound "${voice.name}" as active explainer voice across all scenes`,
+              actions: [`Activated cloned voice "${voice.name}"`],
+              projectState: extractProjectSnapshot(proj),
+            });
+            proj.redoStack = [];
+            updatedProject = await store.saveProject(proj);
+          }
+        }
+
+        res.status(201).json({ voice, ...(updatedProject ? { project: updatedProject } : {}) });
       } catch (err) {
         next(err);
       }
@@ -1017,6 +1265,7 @@ export function createApiRouter(
         voiceId: parsed.data.voiceId,
         text: parsed.data.text,
         playbackMode: parsed.data.playbackMode || targetScene?.voicePlaybackMode,
+        sceneAudioUrl: targetScene?.voiceAudioUrl,
         uploadsRootDir: store.getUploadsDir(),
         sessionHeaderKey: getHeaderKey(req, 'x-elevenlabs-key'),
         vault,
@@ -1041,6 +1290,9 @@ export function createApiRouter(
       if (result.kind === 'audio') {
         res.setHeader('Content-Type', result.contentType);
         res.setHeader('X-Voice-Synthesis-Mode', result.synthesisMode);
+        if (result.dspShaped) {
+          res.setHeader('X-Voice-Dsp-Shaped', 'true');
+        }
         res.send(result.audioBuffer);
         return;
       }
@@ -1182,6 +1434,272 @@ export function createApiRouter(
       next(err);
     }
   });
+
+  // Native SVG Diagram & Technical Illustration Generator
+  router.post('/assets/generate-visual', async (req, res, next) => {
+    try {
+      const parsed = GenerateVisualSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid visual generation request.', details: parsed.error.flatten() });
+        return;
+      }
+
+      let targetProject = parsed.data.projectId
+        ? await store.getProject(parsed.data.projectId)
+        : null;
+      const targetScene =
+        targetProject && parsed.data.sceneId
+          ? targetProject.scenes.find((s) => s.id === parsed.data.sceneId)
+          : undefined;
+
+      const generated = await generateNativeVisualAsset({
+        prompt: parsed.data.prompt,
+        title: parsed.data.title || targetScene?.title,
+        keyPoints: parsed.data.keyPoints || targetScene?.keyPoints,
+        style: parsed.data.style || targetScene?.cinematicStyle || 'Neon Lab',
+        diagramType: parsed.data.diagramType || 'auto',
+        uploadsRootDir: store.getUploadsDir(),
+        assetLibrary,
+      });
+
+      if (targetProject && targetScene) {
+        targetScene.generatedVisualUrl = generated.visualUrl;
+        targetScene.assetIds = Array.from(
+          new Set([generated.asset.id, ...(targetScene.assetIds || [])])
+        );
+        targetScene.ragContext = [
+          {
+            sourceType: 'asset',
+            id: generated.asset.id,
+            name: generated.asset.name,
+            category: generated.asset.category,
+            score: 10,
+            matchedTerms: ['generated-visual'],
+            snippet: generated.asset.technicalSpecs,
+            mediaUrl: generated.visualUrl,
+            mediaType: 'image',
+          },
+          ...(targetScene.ragContext || []).filter((r) => r.id !== generated.asset.id),
+        ];
+        targetProject = await store.saveProject(targetProject);
+      }
+
+      res.status(201).json({
+        asset: generated.asset,
+        visualUrl: generated.visualUrl,
+        diagramType: generated.diagramType,
+        ...(targetProject ? { project: targetProject } : {}),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Sources: PPTX Presentations & NotebookLM Docs / Audio Overviews
+  router.get('/sources', async (_req, res, next) => {
+    try {
+      const sources = await sourceStore.listSources();
+      res.json({ sources });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/sources/:id', async (req, res, next) => {
+    try {
+      const source = await sourceStore.getSource(req.params.id);
+      if (!source) {
+        res.status(404).json({ error: 'Source not found.' });
+        return;
+      }
+      res.json({ source });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete('/sources/:id', async (req, res, next) => {
+    try {
+      const deleted = await sourceStore.deleteSource(req.params.id);
+      if (!deleted) {
+        res.status(404).json({ error: 'Source not found.' });
+        return;
+      }
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    '/sources/import-pptx',
+    (req, res, next) => {
+      sourceMemoryUpload.fields([
+        { name: 'file', maxCount: 1 },
+        { name: 'pptx', maxCount: 1 },
+        { name: 'media', maxCount: 1 },
+      ])(req, res, (err) => {
+        if (err) {
+          res.status(400).json({ error: err.message || 'PPTX upload failed.' });
+          return;
+        }
+        next();
+      });
+    },
+    async (req, res, next) => {
+      try {
+        const filesMap = req.files as Record<string, Express.Multer.File[]> | undefined;
+        const file = filesMap?.file?.[0] || filesMap?.pptx?.[0] || filesMap?.media?.[0];
+        if (!file) {
+          res.status(400).json({ error: 'Upload a .pptx presentation file.' });
+          return;
+        }
+        await sourceStore.ensureInitialized();
+        await assetLibrary.ensureInitialized();
+        const parsedSource = await parseAndImportPptx({
+          buffer: file.buffer,
+          filename: file.originalname,
+          name: typeof req.body?.name === 'string' ? req.body.name : undefined,
+          uploadsSourcesDir: sourceStore.getSourcesUploadDir(),
+          assetLibrary,
+        });
+        const saved = await sourceStore.addSource(parsedSource);
+        res.status(201).json({ source: saved });
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('PPTX')) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        next(err);
+      }
+    }
+  );
+
+  router.post(
+    '/sources/import-notebooklm',
+    (req, res, next) => {
+      if (req.is('multipart/form-data')) {
+        sourceMemoryUpload.fields([
+          { name: 'file', maxCount: 1 },
+          { name: 'media', maxCount: 1 },
+        ])(req, res, (err) => {
+          if (err) {
+            res.status(400).json({ error: err.message || 'NotebookLM upload failed.' });
+            return;
+          }
+          next();
+        });
+      } else {
+        next();
+      }
+    },
+    async (req, res, next) => {
+      try {
+        const filesMap = req.files as Record<string, Express.Multer.File[]> | undefined;
+        const file = filesMap?.file?.[0] || filesMap?.media?.[0];
+        const rawText =
+          typeof req.body?.rawText === 'string'
+            ? req.body.rawText
+            : typeof req.body?.content === 'string'
+              ? req.body.content
+              : undefined;
+        const name = typeof req.body?.name === 'string' ? req.body.name : undefined;
+
+        await sourceStore.ensureInitialized();
+        const parsedSource = await parseAndImportNotebookLm({
+          file: file
+            ? {
+                buffer: file.buffer,
+                originalname: file.originalname,
+                mimetype: file.mimetype,
+              }
+            : undefined,
+          rawText,
+          name,
+          uploadsSourcesDir: sourceStore.getSourcesUploadDir(),
+        });
+        const saved = await sourceStore.addSource(parsedSource);
+        res.status(201).json({ source: saved });
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('Provide NotebookLM')) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        next(err);
+      }
+    }
+  );
+
+  router.post(
+    '/sources/import',
+    (req, res, next) => {
+      if (req.is('multipart/form-data')) {
+        sourceMemoryUpload.fields([
+          { name: 'file', maxCount: 1 },
+          { name: 'media', maxCount: 1 },
+        ])(req, res, (err) => {
+          if (err) {
+            res.status(400).json({ error: err.message || 'Source upload failed.' });
+            return;
+          }
+          next();
+        });
+      } else {
+        next();
+      }
+    },
+    async (req, res, next) => {
+      try {
+        const filesMap = req.files as Record<string, Express.Multer.File[]> | undefined;
+        const file = filesMap?.file?.[0] || filesMap?.media?.[0];
+        const rawText =
+          typeof req.body?.rawText === 'string'
+            ? req.body.rawText
+            : typeof req.body?.content === 'string'
+              ? req.body.content
+              : undefined;
+        const name = typeof req.body?.name === 'string' ? req.body.name : undefined;
+
+        await sourceStore.ensureInitialized();
+        await assetLibrary.ensureInitialized();
+
+        const isPptx =
+          Boolean(file) &&
+          (file!.originalname.toLowerCase().endsWith('.pptx') ||
+            file!.mimetype.includes('presentationml'));
+
+        const parsedSource = isPptx && file
+          ? await parseAndImportPptx({
+              buffer: file.buffer,
+              filename: file.originalname,
+              name,
+              uploadsSourcesDir: sourceStore.getSourcesUploadDir(),
+              assetLibrary,
+            })
+          : await parseAndImportNotebookLm({
+              file: file
+                ? {
+                    buffer: file.buffer,
+                    originalname: file.originalname,
+                    mimetype: file.mimetype,
+                  }
+                : undefined,
+              rawText,
+              name,
+              uploadsSourcesDir: sourceStore.getSourcesUploadDir(),
+            });
+
+        const saved = await sourceStore.addSource(parsedSource);
+        res.status(201).json({ source: saved });
+      } catch (err) {
+        if (err instanceof Error && (err.message.includes('PPTX') || err.message.includes('Provide NotebookLM'))) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        next(err);
+      }
+    }
+  );
 
   // Higgsfield Cinematic Scene generation & job status polling
   router.post('/higgsfield/generate', async (req, res, next) => {

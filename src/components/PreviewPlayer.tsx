@@ -272,10 +272,26 @@ export function PreviewPlayer({
       ? resolvedExternalVideoUrl
       : null;
 
+  const orderedPhotoAssets = (activeScene?.assetIds || [])
+    .map((id) => assets.find((a) => a.id === id && a.sourceType === 'photos' && a.mediaUrls[0]))
+    .filter((a): a is TechAsset => Boolean(a));
+  const ragPhotoAsset =
+    orderedPhotoAssets[0] ||
+    sceneAssets.find((a) => a.sourceType === 'photos' && a.mediaUrls[0]);
+  const activeVisualUrl =
+    ragPhotoAsset?.mediaUrls[0] || activeScene?.generatedVisualUrl || null;
+  const activeVisualLabel = ragPhotoAsset
+    ? ragPhotoAsset.name
+    : activeScene?.generatedVisualUrl
+      ? `${activeScene.title} (Native SVG)`
+      : null;
+  const activeVisualSpecs = ragPhotoAsset
+    ? ragPhotoAsset.technicalSpecs || ragPhotoAsset.description
+    : activeScene?.visualPrompt || '';
+
   const ragVideoAsset = sceneAssets.find(
     (a) => a.sourceType === 'video' && a.mediaUrls[0] && !failedVideoUrls.includes(a.mediaUrls[0])
   );
-  const ragPhotoAsset = sceneAssets.find((a) => a.sourceType === 'photos' && a.mediaUrls[0]);
 
   const stageVideoUrl = externalVideoUrl || ragVideoAsset?.mediaUrls[0] || null;
   const stageVideoFailed =
@@ -329,6 +345,7 @@ export function PreviewPlayer({
     const urlsToPreload = [
       ...project.characters.flatMap((c) => (c.sourceType === 'photos' ? c.mediaUrls : [])),
       ...assets.flatMap((a) => (a.sourceType === 'photos' ? a.mediaUrls : [])),
+      ...project.scenes.map((s) => s.generatedVisualUrl).filter((u): u is string => Boolean(u)),
     ];
     for (const url of urlsToPreload) {
       if (url && !imageCacheRef.current.has(url)) {
@@ -338,7 +355,7 @@ export function PreviewPlayer({
         imageCacheRef.current.set(url, img);
       }
     }
-  }, [project.characters, assets]);
+  }, [project.characters, project.scenes, assets]);
 
   // Continuous 60fps Canvas stage rendering with chapter cards, bullet reveals, diagrams, character/asset overlays & subtitles
   useEffect(() => {
@@ -435,7 +452,7 @@ export function PreviewPlayer({
           ctx.fillStyle = glow;
           ctx.fillRect(0, 0, w, h);
 
-          // Visual tech diagram / asset region
+          // Visual tech diagram / asset / native keyframed animation region
           const charLeft = activeScene.characterPlacement === 'left';
           const charOff = !activeCharacter || activeScene.characterPlacement === 'offscreen';
           const diagCenterX =
@@ -448,60 +465,234 @@ export function PreviewPlayer({
                   : w * 0.36;
           const diagCenterY = h * 0.44;
 
-          const ragPhotoUrl = ragPhotoAsset?.mediaUrls[0];
-          const ragPhotoImg = ragPhotoUrl ? imageCacheRef.current.get(ragPhotoUrl) : undefined;
+          const activePhotoImg = activeVisualUrl
+            ? imageCacheRef.current.get(activeVisualUrl)
+            : undefined;
+          const hasLoadedVisual = Boolean(
+            activePhotoImg && activePhotoImg.complete && activePhotoImg.naturalWidth > 0
+          );
+          const animPreset = activeScene.animationPreset || 'diagram-flow';
+
+          // Background animated layer for particle-network & data-pulse
+          if (animPreset === 'particle-network') {
+            ctx.save();
+            const pts = Array.from({ length: 14 }, (_, i) => ({
+              x: ((i * 173 + Math.sin(t * 0.6 + i) * 35) % (w - 80)) + 40,
+              y: ((i * 97 + Math.cos(t * 0.5 + i * 1.3) * 28) % (h - 140)) + 60,
+            }));
+            ctx.strokeStyle = `${palette.accent}33`;
+            ctx.lineWidth = 1.2;
+            for (let i = 0; i < pts.length; i++) {
+              for (let j = i + 1; j < pts.length; j++) {
+                const dx = pts[i].x - pts[j].x;
+                const dy = pts[i].y - pts[j].y;
+                if (dx * dx + dy * dy < 220 * 220) {
+                  ctx.beginPath();
+                  ctx.moveTo(pts[i].x, pts[i].y);
+                  ctx.lineTo(pts[j].x, pts[j].y);
+                  ctx.stroke();
+                }
+              }
+            }
+            pts.forEach((p, idx) => {
+              ctx.fillStyle = idx % 2 === 0 ? palette.accent : palette.secondary;
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, 3.2 + Math.sin(t * 3 + idx) * 1.1, 0, Math.PI * 2);
+              ctx.fill();
+            });
+            ctx.restore();
+          } else if (animPreset === 'data-pulse') {
+            ctx.save();
+            for (let ring = 0; ring < 3; ring++) {
+              const phase = (t * 0.45 + ring * 0.33) % 1;
+              const radius = 50 + phase * 210;
+              ctx.strokeStyle = ring % 2 === 0 ? palette.accent : palette.secondary;
+              ctx.globalAlpha = (1 - phase) * 0.25;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(diagCenterX, diagCenterY, radius, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
 
           ctx.save();
-          if (ragPhotoAsset && ragPhotoImg && ragPhotoImg.complete && ragPhotoImg.naturalWidth > 0) {
-            const boxW = 410;
-            const boxH = 228;
-            const bx = diagCenterX - boxW / 2;
-            const by = diagCenterY - boxH / 2 - 10;
+          if (hasLoadedVisual && activePhotoImg) {
+            const boxW = 420;
+            const boxH = 232;
+            let slideOffsetX = 0;
+            let revealAlpha = 1;
+            let cardScale = 1;
 
-            ctx.fillStyle = 'rgba(9, 12, 20, 0.92)';
-            ctx.strokeStyle = `${palette.accent}99`;
+            if (animPreset === 'slide-deck-reveal') {
+              const enter = Math.min(1, localElapsed / 0.65);
+              slideOffsetX = (1 - enter) * 32;
+              revealAlpha = 0.25 + enter * 0.75;
+            } else if (animPreset === 'kinetic-cards') {
+              cardScale = 0.98 + Math.sin(t * 1.8) * 0.015;
+            } else if (animPreset === 'data-pulse') {
+              cardScale = 1 + Math.sin(t * 2.5) * 0.012;
+            }
+
+            const bx = diagCenterX - (boxW * cardScale) / 2 + slideOffsetX;
+            const by = diagCenterY - (boxH * cardScale) / 2 - 12;
+            const drawW = boxW * cardScale;
+            const drawH = boxH * cardScale;
+
+            ctx.globalAlpha = revealAlpha;
+            ctx.fillStyle = 'rgba(9, 12, 20, 0.94)';
+            ctx.strokeStyle = `${palette.accent}aa`;
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.roundRect(bx - 4, by - 4, boxW + 8, boxH + 8, 14);
+            ctx.roundRect(bx - 4, by - 4, drawW + 8, drawH + 8, 14);
             ctx.fill();
             ctx.stroke();
 
             ctx.save();
             ctx.beginPath();
-            ctx.roundRect(bx, by, boxW, boxH, 10);
+            ctx.roundRect(bx, by, drawW, drawH, 10);
             ctx.clip();
-            const scale = Math.max(boxW / ragPhotoImg.width, boxH / ragPhotoImg.height);
-            const dw = ragPhotoImg.width * scale;
-            const dh = ragPhotoImg.height * scale;
-            ctx.drawImage(ragPhotoImg, bx + (boxW - dw) / 2, by + (boxH - dh) / 2, dw, dh);
+            const scale = Math.max(drawW / activePhotoImg.width, drawH / activePhotoImg.height);
+            const dw = activePhotoImg.width * scale;
+            const dh = activePhotoImg.height * scale;
+            ctx.drawImage(activePhotoImg, bx + (drawW - dw) / 2, by + (drawH - dh) / 2, dw, dh);
+
+            // Animated scan / highlight sweep for slide-deck-reveal & diagram-flow
+            if (animPreset === 'slide-deck-reveal' || animPreset === 'diagram-flow') {
+              const beamX = bx + ((t * 0.32) % 1.4 - 0.2) * drawW;
+              const beamGrad = ctx.createLinearGradient(beamX - 40, 0, beamX + 40, 0);
+              beamGrad.addColorStop(0, 'transparent');
+              beamGrad.addColorStop(0.5, `${palette.accent}22`);
+              beamGrad.addColorStop(1, 'transparent');
+              ctx.fillStyle = beamGrad;
+              ctx.fillRect(bx, by, drawW, drawH);
+            }
             ctx.restore();
 
-            ctx.fillStyle = 'rgba(9, 9, 14, 0.88)';
+            ctx.fillStyle = 'rgba(9, 9, 14, 0.9)';
             ctx.strokeStyle = `${palette.secondary}88`;
             ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.roundRect(bx, by + boxH + 10, boxW, 38, 8);
+            ctx.roundRect(bx, by + drawH + 10, drawW, 38, 8);
             ctx.fill();
             ctx.stroke();
 
             ctx.fillStyle = palette.accent;
             ctx.font = '600 11px Inter, system-ui, sans-serif';
             ctx.textAlign = 'left';
-            ctx.fillText(`RAG ASSET • ${ragPhotoAsset.name}`, bx + 12, by + boxH + 25);
+            ctx.fillText(
+              `${animPreset.toUpperCase()} • ${(activeVisualLabel || 'Visual').slice(0, 40)}`,
+              bx + 12,
+              by + drawH + 25
+            );
 
             ctx.fillStyle = '#cbd5e1';
             ctx.font = '10px ui-monospace, SFMono-Regular, monospace';
-            const specLine = (ragPhotoAsset.technicalSpecs || ragPhotoAsset.description).slice(0, 60);
-            ctx.fillText(specLine, bx + 12, by + boxH + 39);
+            const specLine = activeVisualSpecs.slice(0, 62);
+            ctx.fillText(specLine, bx + 12, by + drawH + 39);
+            ctx.globalAlpha = 1;
+          } else if (animPreset === 'split-comparison') {
+            const leftX = diagCenterX - 196;
+            const rightX = diagCenterX + 14;
+            const topY = diagCenterY - 96;
+            const kp = activeScene.keyPoints || [];
+            [
+              { x: leftX, title: kp[0] || 'Path A', color: palette.accent },
+              { x: rightX, title: kp[1] || 'Path B', color: palette.secondary },
+            ].forEach((col, ci) => {
+              const lift = Math.sin(t * 2 + ci * Math.PI) * 3;
+              ctx.fillStyle = 'rgba(11, 15, 28, 0.92)';
+              ctx.strokeStyle = col.color;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.roundRect(col.x, topY + lift, 182, 186, 12);
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = col.color;
+              ctx.font = '700 12px Inter, system-ui, sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText(col.title.slice(0, 22), col.x + 91, topY + 32 + lift);
+
+              ctx.fillStyle = '#cbd5e1';
+              ctx.font = '11px Inter, system-ui, sans-serif';
+              ctx.fillText(ci === 0 ? 'Primary Baseline' : 'Target Profile', col.x + 91, topY + 62 + lift);
+              ctx.fillRect(col.x + 28, topY + 95 + lift, 126 * (0.4 + 0.55 * progress), 10);
+            });
+          } else if (animPreset === 'timeline-walkthrough') {
+            const steps = (activeScene.keyPoints && activeScene.keyPoints.length > 0
+              ? activeScene.keyPoints
+              : ['Step 1', 'Step 2', 'Step 3']
+            ).slice(0, 3);
+            const lineY = diagCenterY - 10;
+            const startX = diagCenterX - 165;
+            const endX = diagCenterX + 165;
+            ctx.strokeStyle = `${palette.accent}55`;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(startX, lineY);
+            ctx.lineTo(endX, lineY);
+            ctx.stroke();
+
+            ctx.strokeStyle = palette.accent;
+            ctx.beginPath();
+            ctx.moveTo(startX, lineY);
+            ctx.lineTo(startX + (endX - startX) * progress, lineY);
+            ctx.stroke();
+
+            steps.forEach((st, idx) => {
+              const sx = startX + (idx * (endX - startX)) / Math.max(1, steps.length - 1);
+              const active = progress >= idx / Math.max(1, steps.length);
+              ctx.fillStyle = active ? palette.secondary : '#0f172a';
+              ctx.strokeStyle = palette.accent;
+              ctx.lineWidth = 2.5;
+              ctx.beginPath();
+              ctx.arc(sx, lineY, active ? 16 : 12, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = '#f1f5f9';
+              ctx.font = '600 11px Inter, system-ui, sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText(st.slice(0, 18), sx, lineY + 36);
+            });
+          } else if (animPreset === 'kinetic-cards') {
+            const cards = (activeScene.keyPoints && activeScene.keyPoints.length > 0
+              ? activeScene.keyPoints
+              : [activeScene.title]
+            ).slice(0, 3);
+            cards.forEach((c, idx) => {
+              const enter = Math.min(1, Math.max(0.2, progress * 3 - idx * 0.25));
+              const cx = diagCenterX - 180 + (1 - enter) * 24;
+              const cy = diagCenterY - 98 + idx * 66;
+              ctx.globalAlpha = enter;
+              ctx.fillStyle = 'rgba(12, 16, 30, 0.92)';
+              ctx.strokeStyle = idx % 2 === 0 ? palette.accent : palette.secondary;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.roundRect(cx, cy, 360, 52, 10);
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = '#f8fafc';
+              ctx.font = '600 13px Inter, system-ui, sans-serif';
+              ctx.textAlign = 'left';
+              ctx.fillText(c.slice(0, 42), cx + 18, cy + 31);
+            });
+            ctx.globalAlpha = 1;
           } else if (
             activeScene.visualOverlay === 'neural-graph' ||
             activeScene.visualOverlay === 'architecture-flow'
           ) {
+            const labels = (activeScene.keyPoints && activeScene.keyPoints.length >= 3
+              ? activeScene.keyPoints
+              : [activeScene.title, 'Process', 'Route', 'Kernel', 'Output']
+            ).map((s) => s.slice(0, 14));
             const nodes = [
-              { x: diagCenterX - 170, y: diagCenterY - 68, label: 'Input' },
-              { x: diagCenterX - 50, y: diagCenterY - 105, label: 'Encode' },
-              { x: diagCenterX - 50, y: diagCenterY + 25, label: 'Route' },
-              { x: diagCenterX + 75, y: diagCenterY - 40, label: 'Kernel' },
+              { x: diagCenterX - 170, y: diagCenterY - 68, label: labels[0] || 'Input' },
+              { x: diagCenterX - 50, y: diagCenterY - 105, label: labels[1] || 'Stage 1' },
+              { x: diagCenterX - 50, y: diagCenterY + 25, label: labels[2] || 'Stage 2' },
+              { x: diagCenterX + 75, y: diagCenterY - 40, label: labels[3] || 'Core' },
               { x: diagCenterX + 190, y: diagCenterY - 40, label: 'Output' },
             ];
             const edges = [
@@ -537,12 +728,12 @@ export function PreviewPlayer({
               ctx.strokeStyle = idx === 3 ? palette.secondary : palette.accent;
               ctx.lineWidth = 2.5;
               ctx.beginPath();
-              ctx.roundRect(n.x - 38 * pulse, n.y - 19 * pulse, 76 * pulse, 38 * pulse, 10);
+              ctx.roundRect(n.x - 42 * pulse, n.y - 19 * pulse, 84 * pulse, 38 * pulse, 10);
               ctx.fill();
               ctx.stroke();
 
               ctx.fillStyle = '#e2e8f0';
-              ctx.font = '600 12px Inter, system-ui, sans-serif';
+              ctx.font = '600 11px Inter, system-ui, sans-serif';
               ctx.textAlign = 'center';
               ctx.textBaseline = 'middle';
               ctx.fillText(n.label, n.x, n.y);
@@ -737,8 +928,8 @@ export function PreviewPlayer({
 
           ctx.restore();
 
-          // Scene Transitions (0..0.7s)
-          if (localElapsed < 0.7) {
+          // Scene Transitions (0..0.7s during playback or export; keep paused 00:00 frame full brightness)
+          if ((isPlaying || exportingVideo) && localElapsed < 0.7) {
             const p = localElapsed / 0.7;
             const alpha = 1 - p;
             if (activeScene.transitionIn === 'Glitch Cut') {
@@ -815,7 +1006,7 @@ export function PreviewPlayer({
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [activeScene, activeEntry, activeChapter, activeCharacter, ragPhotoAsset, isPlaying, exportingVideo]);
+  }, [activeScene, activeEntry, activeChapter, activeCharacter, activeVisualUrl, activeVisualLabel, activeVisualSpecs, isPlaying, exportingVideo]);
 
   const activeIndex = sceneOffsets.findIndex((e) => e.scene.id === activeScene?.id);
 

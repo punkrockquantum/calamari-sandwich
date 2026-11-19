@@ -14,8 +14,12 @@ import type { VoicePlaybackMode, VoiceTraits } from '@shared/types';
 
 interface VoiceCloningModalProps {
   open: boolean;
+  projectId?: string;
   onClose: () => void;
-  onCloneVoice: (formData: FormData) => Promise<void>;
+  onCloneVoice: (
+    formData: FormData,
+    options?: { setAsActiveExplainerVoice: boolean }
+  ) => Promise<void>;
   busy: boolean;
 }
 
@@ -29,6 +33,7 @@ const TONE_OPTIONS = [
 
 export function VoiceCloningModal({
   open,
+  projectId,
   onClose,
   onCloneVoice,
   busy,
@@ -36,7 +41,8 @@ export function VoiceCloningModal({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [sampleMode, setSampleMode] = useState<'upload' | 'record' | 'traits'>('upload');
-  const [playbackMode, setPlaybackMode] = useState<VoicePlaybackMode>('direct-sample');
+  const [playbackMode, setPlaybackMode] = useState<VoicePlaybackMode>('speak-script');
+  const [setAsActiveExplainerVoice, setSetAsActiveExplainerVoice] = useState(true);
   const [sampleFile, setSampleFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -106,7 +112,6 @@ export function VoiceCloningModal({
         const ext = mime.includes('wav') ? 'wav' : mime.includes('ogg') ? 'ogg' : 'webm';
         const file = new File([blob], `mic-sample-${Date.now()}.${ext}`, { type: mime });
         setSampleFile(file);
-        setPlaybackMode('direct-sample');
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       };
@@ -176,12 +181,14 @@ export function VoiceCloningModal({
     fd.append('warmth', String(warmth));
     fd.append('cadence', cadence);
     fd.append('playbackMode', effectivePlaybackMode);
+    if (projectId) fd.append('projectId', projectId);
+    fd.append('setAsActiveExplainerVoice', String(setAsActiveExplainerVoice));
     if (sampleMode !== 'traits' && fileToUpload) {
       fd.append('sample', fileToUpload);
     }
 
     try {
-      await onCloneVoice(fd);
+      await onCloneVoice(fd, { setAsActiveExplainerVoice });
       setName('');
       setDescription('');
       setSampleFile(null);
@@ -274,8 +281,6 @@ export function VoiceCloningModal({
                     setSampleMode(id);
                     if (id === 'traits') {
                       setPlaybackMode('speak-script');
-                    } else if (id === 'record') {
-                      setPlaybackMode('direct-sample');
                     }
                     setError(null);
                   }}
@@ -447,6 +452,24 @@ export function VoiceCloningModal({
               />
             </div>
           </div>
+
+          {/* Set as Active Explainer Voice Toggle */}
+          <label className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 cursor-pointer">
+            <div>
+              <div className="text-xs font-semibold text-amber-100">
+                Set as Active Explainer Voice
+              </div>
+              <div className="text-[10px] text-amber-200/75">
+                Immediately binds primary voice &amp; updates all scenes in this project (sample f0Hz, warmth &amp; cadence analyzed on save)
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={setAsActiveExplainerVoice}
+              onChange={(e) => setSetAsActiveExplainerVoice(e.target.checked)}
+              className="w-4 h-4 accent-amber-400 rounded shrink-0"
+            />
+          </label>
 
           {error && (
             <div className="rounded-xl border border-rose-500/40 bg-rose-950/30 p-2.5 text-xs text-rose-200 flex items-center gap-2">

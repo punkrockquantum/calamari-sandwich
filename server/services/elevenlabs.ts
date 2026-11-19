@@ -14,6 +14,7 @@ import type {
 } from '../../shared/types.js';
 import { maskCredential, type CredentialVault } from '../store/credentialVault.js';
 import type { VoiceStore } from '../store/voiceStore.js';
+import { shapeVoiceWavBuffer } from './voiceDsp.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -329,11 +330,15 @@ export function resolveSpeechProfile(
 ): SpeechProfileMapping {
   const mockVoice = MOCK_VOICES.find((v) => v.voice_id === voiceId);
   const traits = nativeVoice?.traits;
+  const sig = nativeVoice?.acousticSignature;
   const labels = nativeVoice?.labels || mockVoice?.labels || {};
   const toneLower = (traits?.tone || '').toLowerCase();
-  const pitchTrait = traits?.pitch || 'medium';
+  const pitchTrait =
+    traits?.pitch ||
+    (sig ? (sig.f0Hz < 145 ? 'low' : sig.f0Hz > 195 ? 'high' : 'medium') : 'medium');
   const cadence = traits?.cadence || 'conversational';
-  const warmth = traits?.warmth ?? 68;
+  const warmth = sig?.warmth ?? traits?.warmth ?? 68;
+  const brightness = sig?.brightness ?? 52;
 
   let macOsVoice: SpeechProfileMapping['macOsVoice'] = 'Samantha';
   let gender: 'female' | 'male' | 'neutral' = 'female';
@@ -365,13 +370,14 @@ export function resolveSpeechProfile(
     if (
       labelGender === 'male' ||
       pitchTrait === 'low' ||
+      (sig && sig.f0Hz < 148) ||
       toneLower.includes('deep') ||
       toneLower.includes('documentary')
     ) {
       gender = 'male';
       macOsVoice = toneLower.includes('analyst') ? 'Rishi' : pitchTrait === 'low' ? 'Daniel' : 'Alex';
       espeakVoice = pitchTrait === 'low' ? 'en-us+m2' : 'en-us+m3';
-    } else if (pitchTrait === 'high' || toneLower.includes('energetic')) {
+    } else if (pitchTrait === 'high' || (sig && sig.f0Hz > 195) || toneLower.includes('energetic')) {
       gender = 'female';
       macOsVoice = toneLower.includes('energetic') ? 'Karen' : 'Ava';
       espeakVoice = 'en-us+f4';
@@ -386,15 +392,37 @@ export function resolveSpeechProfile(
     }
   }
 
-  const wpm = cadence === 'brisk' ? 204 : cadence === 'measured' ? 152 : 176;
-  const espeakPitch = pitchTrait === 'low' ? 36 : pitchTrait === 'high' ? 66 : 50;
-  const rate = cadence === 'brisk' ? 1.16 : cadence === 'measured' ? 0.88 : 1.02;
+  const wpm = sig?.speakingRateWpm
+    ? Math.max(120, Math.min(230, Math.round(sig.speakingRateWpm)))
+    : cadence === 'brisk'
+      ? 204
+      : cadence === 'measured'
+        ? 152
+        : 176;
+  const espeakPitch = sig?.f0Hz
+    ? Math.max(15, Math.min(85, Math.round(((sig.f0Hz - 80) / 180) * 70 + 15)))
+    : pitchTrait === 'low'
+      ? 36
+      : pitchTrait === 'high'
+        ? 66
+        : 50;
+  const rate = sig?.speakingRateWpm
+    ? Number(Math.max(0.75, Math.min(1.45, sig.speakingRateWpm / 172)).toFixed(2))
+    : cadence === 'brisk'
+      ? 1.16
+      : cadence === 'measured'
+        ? 0.88
+        : 1.02;
   const warmthPitchOffset = ((warmth - 65) / 100) * -0.05;
+  const basePitchFromSig = sig?.f0Hz
+    ? Math.max(0.68, Math.min(1.45, sig.f0Hz / 165))
+    : pitchTrait === 'low'
+      ? 0.86
+      : pitchTrait === 'high'
+        ? 1.16
+        : 1.0;
   const pitch = Number(
-    Math.max(
-      0.7,
-      Math.min(1.4, (pitchTrait === 'low' ? 0.86 : pitchTrait === 'high' ? 1.16 : 1.0) + warmthPitchOffset)
-    ).toFixed(2)
+    Math.max(0.68, Math.min(1.45, basePitchFromSig + warmthPitchOffset)).toFixed(2)
   );
 
   const preferredVoices =
@@ -416,6 +444,8 @@ export function resolveSpeechProfile(
       preferredVoices: Array.from(new Set(preferredVoices)),
       tone: traits?.tone,
       warmth,
+      brightness,
+      f0Hz: sig?.f0Hz,
       cadence,
     },
   };
@@ -663,6 +693,7 @@ export type SynthesizeSpeechResult =
       contentType: string;
       source: 'elevenlabs' | 'native' | 'mock';
       synthesisMode: 'elevenlabs' | 'direct-sample' | 'macos-say' | 'espeak-ng' | 'espeak';
+      dspShaped?: boolean;
       fallbackReason?: string;
     }
   | {
@@ -717,6 +748,7 @@ export async function synthesizeElevenLabsSpeech(params: {
   voiceId: string;
   text: string;
   playbackMode?: 'auto' | VoicePlaybackMode;
+  sceneAudioUrl?: string;
   uploadsRootDir?: string;
   sessionHeaderKey?: string;
   vault?: CredentialVault;
@@ -726,6 +758,31 @@ export async function synthesizeElevenLabsSpeech(params: {
 }): Promise<SynthesizeSpeechResult> {
   const { key, endpoint } = resolveElevenLabsKey(params.sessionHeaderKey, params.vault);
   const nativeVoice = params.voiceStore ? await params.voiceStore.getVoice(params.voiceId) : null;
+
+  // Per-scene recorded take takes precedence when direct-sample or auto mode is active for that take
+  if (params.sceneAudioUrl && params.playbackMode !== 'speak-script') {
+    const takeBuf = readVoiceSampleFromUploads(params.sceneAudioUrl, params.uploadsRootDir);
+    if (takeBuf) {
+      const ext = path.extname(params.sceneAudioUrl).toLowerCase();
+      const mime =
+        ext === '.webm'
+          ? 'audio/webm'
+          : ext === '.mp3'
+            ? 'audio/mpeg'
+            : ext === '.ogg'
+              ? 'audio/ogg'
+              : ext === '.m4a'
+                ? 'audio/mp4'
+                : 'audio/wav';
+      return {
+        kind: 'audio',
+        audioBuffer: takeBuf,
+        contentType: mime,
+        source: 'native',
+        synthesisMode: 'direct-sample',
+      };
+    }
+  }
 
   if (nativeVoice) {
     const effectiveMode: VoicePlaybackMode =
@@ -791,12 +848,17 @@ export async function synthesizeElevenLabsSpeech(params: {
       execFileFn: params.execFileFn,
     });
     if (systemSpeech) {
+      const shapedAudio = shapeVoiceWavBuffer(systemSpeech.audioBuffer, {
+        traits: nativeVoice.traits,
+        acousticSignature: nativeVoice.acousticSignature,
+      });
       return {
         kind: 'audio',
-        audioBuffer: systemSpeech.audioBuffer,
+        audioBuffer: shapedAudio,
         contentType: 'audio/wav',
         source: 'native',
         synthesisMode: systemSpeech.engine,
+        dspShaped: true,
       };
     }
 

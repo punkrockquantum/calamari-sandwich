@@ -1,6 +1,15 @@
 // Studio audio preview, timeline voiceover playback, browser SpeechSynthesis & ambient bed
 
-import type { TtsSpeechConfig } from '@shared/types';
+import type { TtsSpeechConfig, VoiceAcousticSignature, VoiceTraits } from '@shared/types';
+
+export interface VoicePlaybackTuning {
+  warmth?: number;
+  brightness?: number;
+  f0Hz?: number;
+  cadence?: VoiceTraits['cadence'];
+  acousticSignature?: VoiceAcousticSignature;
+  dspShaped?: boolean;
+}
 
 let activeAudioEl: HTMLAudioElement | null = null;
 let activeBufferSource: AudioBufferSourceNode | null = null;
@@ -101,7 +110,7 @@ async function playViaAudioContext(
   url: string,
   volume: number,
   startOffsetSec: number,
-  warmth?: number
+  tuning?: VoicePlaybackTuning
 ): Promise<boolean> {
   const ctx = getAudioContext();
   if (!ctx) return false;
@@ -118,17 +127,38 @@ async function playViaAudioContext(
     const gain = ctx.createGain();
     gain.gain.value = Math.max(0, Math.min(1, volume));
 
-    if (typeof warmth === 'number' && warmth !== 65) {
+    const warmth = tuning?.acousticSignature?.warmth ?? tuning?.warmth;
+    const brightness = tuning?.acousticSignature?.brightness ?? tuning?.brightness;
+    const f0Hz = tuning?.acousticSignature?.f0Hz ?? tuning?.f0Hz;
+
+    // Apply subtle playback detune only if the server did not already DSP-shape the PCM WAV
+    if (!tuning?.dspShaped && typeof f0Hz === 'number' && f0Hz > 0) {
+      const ratio = Math.max(0.84, Math.min(1.18, f0Hz / 165));
+      const cents = Math.round(1200 * Math.log2(ratio));
+      if (Math.abs(cents) > 25 && typeof source.detune !== 'undefined') {
+        source.detune.value = cents * 0.45;
+      }
+    }
+
+    let tailNode: AudioNode = source;
+    if (!tuning?.dspShaped && typeof warmth === 'number' && Math.abs(warmth - 55) > 5) {
       const warmthFilter = ctx.createBiquadFilter();
       warmthFilter.type = 'lowshelf';
       warmthFilter.frequency.value = 220;
-      warmthFilter.gain.value = ((warmth - 65) / 35) * 3.5;
-      source.connect(warmthFilter);
-      warmthFilter.connect(gain);
-    } else {
-      source.connect(gain);
+      warmthFilter.gain.value = ((warmth - 55) / 45) * 4.2;
+      tailNode.connect(warmthFilter);
+      tailNode = warmthFilter;
+    }
+    if (!tuning?.dspShaped && typeof brightness === 'number' && Math.abs(brightness - 50) > 5) {
+      const brightFilter = ctx.createBiquadFilter();
+      brightFilter.type = 'highshelf';
+      brightFilter.frequency.value = 3200;
+      brightFilter.gain.value = ((brightness - 50) / 50) * 3.8;
+      tailNode.connect(brightFilter);
+      tailNode = brightFilter;
     }
 
+    tailNode.connect(gain);
     gain.connect(ctx.destination);
     const offset =
       startOffsetSec > 0.25 && startOffsetSec < decoded.duration - 0.15
@@ -152,13 +182,19 @@ export async function playVoiceBlobUrl(
   url: string,
   volume = 0.9,
   startOffsetSec = 0,
-  traits?: { warmth?: number }
+  traits?: VoicePlaybackTuning
 ): Promise<{ ok: boolean; error?: string }> {
   stopVoiceAudio();
 
-  // When a custom warmth trait is specified, prefer AudioContext EQ chain if available
-  if (typeof traits?.warmth === 'number' && traits.warmth !== 65) {
-    const eqOk = await playViaAudioContext(url, volume, startOffsetSec, traits.warmth);
+  const warmth = traits?.acousticSignature?.warmth ?? traits?.warmth;
+  const brightness = traits?.acousticSignature?.brightness ?? traits?.brightness;
+  const needsEq =
+    !traits?.dspShaped &&
+    ((typeof warmth === 'number' && Math.abs(warmth - 55) > 5) ||
+      (typeof brightness === 'number' && Math.abs(brightness - 50) > 5));
+
+  if (needsEq) {
+    const eqOk = await playViaAudioContext(url, volume, startOffsetSec, traits);
     if (eqOk) return { ok: true };
   }
 
@@ -186,7 +222,7 @@ export async function playVoiceBlobUrl(
     await audio.play();
     return { ok: true };
   } catch (err) {
-    const fallbackOk = await playViaAudioContext(url, volume, startOffsetSec, traits?.warmth);
+    const fallbackOk = await playViaAudioContext(url, volume, startOffsetSec, traits);
     if (fallbackOk) {
       return { ok: true };
     }
@@ -286,7 +322,11 @@ export async function speakWithBrowserSpeechSynthesis(params: {
 
   const chosenVoice = selectBrowserSpeechVoice(availableVoices, params.speechConfig);
   const clampedRate = Math.max(0.6, Math.min(1.8, params.speechConfig.rate || 1.0));
-  const clampedPitch = Math.max(0.5, Math.min(1.8, params.speechConfig.pitch || 1.0));
+  const f0Pitch =
+    typeof params.speechConfig.f0Hz === 'number' && params.speechConfig.f0Hz > 0
+      ? Math.max(0.65, Math.min(1.55, params.speechConfig.f0Hz / 165))
+      : params.speechConfig.pitch || 1.0;
+  const clampedPitch = Math.max(0.5, Math.min(1.8, params.speechConfig.pitch || f0Pitch));
   const volume = Math.max(0, Math.min(1, params.volume ?? 0.92));
 
   try {

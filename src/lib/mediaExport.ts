@@ -33,6 +33,7 @@ export async function exportCanvasWithAudioWebm(params: {
   canvas: HTMLCanvasElement;
   voiceBlob?: Blob;
   durationSec: number;
+  voiceTraits?: { warmth?: number; brightness?: number; dspShaped?: boolean };
 }): Promise<{ blob: Blob; hasAudioTrack: boolean }> {
   if (typeof MediaRecorder === 'undefined' || typeof params.canvas.captureStream !== 'function') {
     throw new Error('Video export via MediaRecorder is not supported in this browser.');
@@ -62,7 +63,28 @@ export async function exportCanvasWithAudioWebm(params: {
         const dest = audioCtx.createMediaStreamDestination();
         audioSource = audioCtx.createBufferSource();
         audioSource.buffer = decoded;
-        audioSource.connect(dest);
+
+        let tailNode: AudioNode = audioSource;
+        const warmth = params.voiceTraits?.warmth;
+        const brightness = params.voiceTraits?.brightness;
+        if (!params.voiceTraits?.dspShaped && typeof warmth === 'number' && Math.abs(warmth - 55) > 5) {
+          const lowShelf = audioCtx.createBiquadFilter();
+          lowShelf.type = 'lowshelf';
+          lowShelf.frequency.value = 220;
+          lowShelf.gain.value = ((warmth - 55) / 45) * 4.2;
+          tailNode.connect(lowShelf);
+          tailNode = lowShelf;
+        }
+        if (!params.voiceTraits?.dspShaped && typeof brightness === 'number' && Math.abs(brightness - 50) > 5) {
+          const highShelf = audioCtx.createBiquadFilter();
+          highShelf.type = 'highshelf';
+          highShelf.frequency.value = 3200;
+          highShelf.gain.value = ((brightness - 50) / 50) * 3.8;
+          tailNode.connect(highShelf);
+          tailNode = highShelf;
+        }
+        tailNode.connect(dest);
+
         combinedTracks.push(...dest.stream.getAudioTracks());
         hasAudioTrack = dest.stream.getAudioTracks().length > 0;
         // Preserve full spoken audio up to 45s instead of truncating mid-sentence
