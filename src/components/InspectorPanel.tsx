@@ -1,15 +1,19 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  BookOpen,
   Camera,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Database,
   Download,
   Film,
   Loader2,
   LogIn,
   Mic,
+  MicOff,
   Music,
   Play,
   Plus,
@@ -17,10 +21,12 @@ import {
   Send,
   Sparkles,
   Trash2,
+  Upload,
   User,
   UserPlus,
   Video,
   Volume2,
+  Wand2,
 } from 'lucide-react';
 import type {
   CameraMotionPreset,
@@ -30,8 +36,11 @@ import type {
   ConnectorDescriptor,
   ConnectorId,
   ExplainerProject,
+  ImportedSource,
   MusicTrack,
+  NativeVisualDiagramType,
   PushVoiceElevenLabsResult,
+  SceneAnimationPreset,
   SceneItem,
   SceneVisualOverlay,
   TechAsset,
@@ -40,7 +49,7 @@ import type {
   VoiceProfile,
 } from '@shared/types';
 
-type InspectorTab = 'scene' | 'characters' | 'voices' | 'assets' | 'music';
+type InspectorTab = 'scene' | 'characters' | 'voices' | 'sources' | 'assets' | 'music';
 
 interface InspectorPanelProps {
   project: ExplainerProject;
@@ -50,6 +59,7 @@ interface InspectorPanelProps {
   connectors: ConnectorDescriptor[];
   allCharacters: CharacterProfile[];
   assets: TechAsset[];
+  sources: ImportedSource[];
   lastVoicePushResult?: PushVoiceElevenLabsResult | null;
   onUpdateScene: (sceneId: string, patch: Partial<SceneItem>) => Promise<void>;
   onTriggerHiggsfield: (sceneId: string) => Promise<void>;
@@ -66,10 +76,16 @@ interface InspectorPanelProps {
   onPushVoiceToElevenLabs: (voiceId: string) => Promise<void>;
   onSyncElevenLabsVoices: () => Promise<void>;
   onAssignVoiceToAllScenes: (voiceId: string) => Promise<void>;
+  onUploadSceneVoiceTake: (sceneId: string, file: File) => Promise<void>;
+  onDeleteSceneVoiceTake: (sceneId: string) => Promise<void>;
+  onGenerateSceneVisual: (sceneId: string, diagramType: NativeVisualDiagramType) => Promise<void>;
   onOpenConnectModal: (id: ConnectorId) => void;
   onOpenCharacterClone: () => void;
   onOpenVoiceClone: () => void;
   onOpenAssetUpload: () => void;
+  onOpenSourceImport: () => void;
+  onDeleteSource: (sourceId: string) => Promise<void>;
+  onGenerateFromSource: (source: ImportedSource) => Promise<void>;
   onDeleteAsset: (assetId: string) => Promise<void>;
   onAddMusicTrack: (track: Omit<MusicTrack, 'id'>) => Promise<void>;
   onDeleteMusicTrack: (trackId: string) => Promise<void>;
@@ -109,6 +125,25 @@ const OVERLAY_OPTIONS: { value: SceneVisualOverlay; label: string }[] = [
   { value: 'wave-spectrum', label: 'Wave Spectrum' },
 ];
 
+const ANIMATION_PRESET_OPTIONS: { value: SceneAnimationPreset; label: string }[] = [
+  { value: 'diagram-flow', label: 'Diagram Flow' },
+  { value: 'kinetic-cards', label: 'Kinetic Cards' },
+  { value: 'slide-deck-reveal', label: 'Slide Deck Reveal' },
+  { value: 'data-pulse', label: 'Data Pulse' },
+  { value: 'split-comparison', label: 'Split Comparison' },
+  { value: 'timeline-walkthrough', label: 'Timeline Walkthrough' },
+  { value: 'particle-network', label: 'Particle Network' },
+];
+
+const DIAGRAM_TYPE_OPTIONS: { value: NativeVisualDiagramType; label: string }[] = [
+  { value: 'auto', label: 'Auto-Detect' },
+  { value: 'architecture', label: 'Architecture' },
+  { value: 'flow', label: 'Sequence / Flow' },
+  { value: 'comparison', label: 'Comparison' },
+  { value: 'infographic', label: 'Metric Infographic' },
+  { value: 'hardware', label: 'Hardware / Cloud' },
+];
+
 const PLACEMENT_OPTIONS: { value: CharacterPlacement; label: string }[] = [
   { value: 'left', label: 'Left Stage' },
   { value: 'center', label: 'Center' },
@@ -125,6 +160,7 @@ export function InspectorPanel({
   connectors,
   allCharacters,
   assets,
+  sources,
   lastVoicePushResult,
   onUpdateScene,
   onTriggerHiggsfield,
@@ -137,10 +173,16 @@ export function InspectorPanel({
   onPushVoiceToElevenLabs,
   onSyncElevenLabsVoices,
   onAssignVoiceToAllScenes,
+  onUploadSceneVoiceTake,
+  onDeleteSceneVoiceTake,
+  onGenerateSceneVisual,
   onOpenConnectModal,
   onOpenCharacterClone,
   onOpenVoiceClone,
   onOpenAssetUpload,
+  onOpenSourceImport,
+  onDeleteSource,
+  onGenerateFromSource,
   onDeleteAsset,
   onAddMusicTrack,
   onDeleteMusicTrack,
@@ -151,6 +193,64 @@ export function InspectorPanel({
   const [musicMood, setMusicMood] = useState('Ambient Tech');
   const [musicBpm, setMusicBpm] = useState(110);
   const [musicDb, setMusicDb] = useState(-15);
+  const [diagramType, setDiagramType] = useState<NativeVisualDiagramType>('auto');
+  const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
+  const [recordingTake, setRecordingTake] = useState(false);
+  const [takeSec, setTakeSec] = useState(0);
+  const takeRecorderRef = useRef<MediaRecorder | null>(null);
+  const takeStreamRef = useRef<MediaStream | null>(null);
+  const takeChunksRef = useRef<Blob[]>([]);
+  const takeTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (takeTimerRef.current) window.clearInterval(takeTimerRef.current);
+      if (takeStreamRef.current) takeStreamRef.current.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const startSceneTakeRecording = async () => {
+    if (!activeScene || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      return;
+    }
+    const targetSceneId = activeScene.id;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    takeStreamRef.current = stream;
+    takeChunksRef.current = [];
+    const recorder = new MediaRecorder(stream);
+    takeRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0) takeChunksRef.current.push(ev.data);
+    };
+    recorder.onstop = () => {
+      const mime = recorder.mimeType || 'audio/webm';
+      const blob = new Blob(takeChunksRef.current, { type: mime });
+      const ext = mime.includes('wav') ? 'wav' : mime.includes('ogg') ? 'ogg' : 'webm';
+      if (blob.size > 0) {
+        const file = new File([blob], `scene-take-${Date.now()}.${ext}`, { type: mime });
+        void onUploadSceneVoiceTake(targetSceneId, file);
+      }
+      stream.getTracks().forEach((t) => t.stop());
+      takeStreamRef.current = null;
+    };
+
+    recorder.start();
+    setTakeSec(0);
+    setRecordingTake(true);
+    takeTimerRef.current = window.setInterval(() => setTakeSec((s) => s + 1), 1000);
+  };
+
+  const stopSceneTakeRecording = () => {
+    if (takeTimerRef.current) {
+      window.clearInterval(takeTimerRef.current);
+      takeTimerRef.current = null;
+    }
+    if (takeRecorderRef.current && takeRecorderRef.current.state !== 'inactive') {
+      takeRecorderRef.current.stop();
+    }
+    setRecordingTake(false);
+  };
 
   const elevenLabsConnector = connectors.find((c) => c.id === 'elevenlabs');
   const higgsfieldConnector = connectors.find((c) => c.id === 'higgsfield');
@@ -201,13 +301,14 @@ export function InspectorPanel({
 
   return (
     <aside className="w-full lg:w-[375px] xl:w-[405px] shrink-0 bg-[#0d0d14] border border-zinc-800/90 rounded-xl flex flex-col overflow-hidden">
-      {/* 5 Tabs */}
-      <div className="grid grid-cols-5 border-b border-zinc-800/90 bg-zinc-950/70 p-1 gap-1">
+      {/* 6 Tabs */}
+      <div className="grid grid-cols-6 border-b border-zinc-800/90 bg-zinc-950/70 p-1 gap-1">
         {(
           [
             { id: 'scene', label: 'Scene', icon: Film },
             { id: 'characters', label: 'Cast', icon: User },
             { id: 'voices', label: 'Voices', icon: Mic },
+            { id: 'sources', label: 'Sources', icon: BookOpen },
             { id: 'assets', label: 'Assets', icon: Database },
             { id: 'music', label: 'Music', icon: Music },
           ] as const
@@ -216,14 +317,14 @@ export function InspectorPanel({
             key={id}
             type="button"
             onClick={() => setTab(id)}
-            className={`flex items-center justify-center gap-1 py-2 rounded-lg text-[11px] font-medium transition ${
+            className={`flex items-center justify-center gap-1 py-2 rounded-lg text-[10.5px] font-medium transition ${
               tab === id
                 ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/40'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
             }`}
           >
             <Icon className="w-3 h-3 shrink-0" />
-            <span>{label}</span>
+            <span className="truncate">{label}</span>
           </button>
         ))}
       </div>
@@ -336,7 +437,73 @@ export function InspectorPanel({
               />
             </div>
 
+            {/* Native SVG Diagram & Illustration Generator */}
+            <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-cyan-200 flex items-center gap-1.5">
+                  <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
+                  Native Visual &amp; Diagram Studio
+                </span>
+                <select
+                  aria-label="Diagram Type"
+                  value={diagramType}
+                  onChange={(e) => setDiagramType(e.target.value as NativeVisualDiagramType)}
+                  className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-0.5 text-[10px] text-zinc-200"
+                >
+                  {DIAGRAM_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busyAction === 'generate-visual'}
+                  onClick={() => void onGenerateSceneVisual(activeScene.id, diagramType)}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-cyan-600/25 hover:bg-cyan-600/35 border border-cyan-400/50 py-1.5 text-[11px] font-semibold text-cyan-100 transition disabled:opacity-50"
+                >
+                  {busyAction === 'generate-visual' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  Generate Native SVG Visual
+                </button>
+              </div>
+              {activeScene.generatedVisualUrl && (
+                <div className="rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950">
+                  <img
+                    src={activeScene.generatedVisualUrl}
+                    alt={activeScene.title}
+                    className="w-full h-24 object-cover"
+                  />
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] text-zinc-400 mb-1">Animation Preset</label>
+                <select
+                  aria-label="Animation Preset"
+                  value={activeScene.animationPreset || 'diagram-flow'}
+                  onChange={(e) =>
+                    void onUpdateScene(activeScene.id, {
+                      animationPreset: e.target.value as SceneAnimationPreset,
+                    })
+                  }
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-100"
+                >
+                  {ANIMATION_PRESET_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-[11px] text-zinc-400 mb-1">Camera Motion</label>
                 <select
@@ -546,11 +713,91 @@ export function InspectorPanel({
                   <div className="text-[10px] text-zinc-400 leading-snug">
                     {selectedVoice?.source === 'elevenlabs'
                       ? 'Neural TTS synthesized via connected ElevenLabs account.'
-                      : selectedVoice?.source === 'native' &&
-                          effectiveSceneMode === 'direct-sample' &&
-                          selectedVoice.sampleUrl
-                        ? 'Plays your recorded/uploaded voice clip directly in timeline & video export.'
-                        : 'Uses local system speech + voice traits. Connect ElevenLabs for neural timbre cloning.'}
+                      : activeScene.voiceAudioUrl && effectiveSceneMode === 'direct-sample'
+                        ? 'Using your per-scene recorded/attached audio take in timeline & export.'
+                        : selectedVoice?.source === 'native' &&
+                            effectiveSceneMode === 'direct-sample' &&
+                            selectedVoice.sampleUrl
+                          ? 'Plays your recorded/uploaded voice clip directly in timeline & video export.'
+                          : 'Uses local system speech + DSP acoustic profile. Connect ElevenLabs for neural cloning.'}
+                  </div>
+
+                  {/* Per-Scene Frictionless Record Scene Take / Attach Audio Clip */}
+                  <div className="pt-1.5 border-t border-amber-500/20 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                        Record Scene Take / Attach Clip
+                      </span>
+                      {activeScene.voiceAudioUrl && (
+                        <span className="text-[10px] text-emerald-300 font-medium">
+                          Scene Take Active
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={
+                          recordingTake
+                            ? stopSceneTakeRecording
+                            : () => void startSceneTakeRecording()
+                        }
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${
+                          recordingTake
+                            ? 'border-rose-500 bg-rose-600 text-white'
+                            : 'border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200'
+                        }`}
+                      >
+                        {recordingTake ? (
+                          <>
+                            <MicOff className="w-3 h-3" /> Stop ({takeSec}s)
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-3 h-3" /> Record Scene Take
+                          </>
+                        )}
+                      </button>
+
+                      <label className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 px-2 py-1 text-[10px] font-medium text-zinc-200 cursor-pointer transition">
+                        <Upload className="w-3 h-3 text-cyan-300" />
+                        Attach Audio
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) {
+                              void onUploadSceneVoiceTake(activeScene.id, f);
+                            }
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+
+                      {activeScene.voiceAudioUrl && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void onPlaySampleUrl(activeScene.voiceAudioUrl!, activeScene.title)
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-2 py-1 text-[10px] text-cyan-200"
+                          >
+                            <Play className="w-2.5 h-2.5" /> Play Take
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteSceneVoiceTake(activeScene.id)}
+                            title="Clear Scene Take"
+                            className="p-1 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-900"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
@@ -907,19 +1154,20 @@ export function InspectorPanel({
             <div className="space-y-2">
               {voices.map((v) => {
                 const isSelected = activeScene?.voiceId === v.voice_id;
+                const isPrimary = project.primaryVoiceId === v.voice_id;
                 const isNative = v.source === 'native';
                 return (
                   <div
                     key={v.voice_id}
                     className={`rounded-xl border p-2.5 space-y-2 ${
-                      isSelected
+                      isPrimary || isSelected
                         ? 'border-amber-500/50 bg-amber-950/15'
                         : 'border-zinc-800 bg-zinc-950/70'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs font-semibold text-zinc-100 truncate">
                             {v.name}
                           </span>
@@ -937,12 +1185,19 @@ export function InspectorPanel({
                               : isNative
                                 ? v.playbackMode === 'direct-sample' && v.sampleUrl
                                   ? 'Direct Clip'
-                                  : 'System Speech + Traits'
+                                  : 'Native DSP Clone'
                                 : 'System Speech'}
                           </span>
+                          {isPrimary && (
+                            <span className="text-[9px] rounded px-1.5 py-0.2 border border-emerald-400/50 bg-emerald-500/15 text-emerald-200 font-semibold shrink-0">
+                              Active Explainer Voice
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-zinc-400 truncate">
-                          {Object.values(v.labels).slice(0, 4).join(' • ') || v.category}
+                          {v.acousticSignature
+                            ? `${v.acousticSignature.f0Hz} Hz • ${v.acousticSignature.warmth}% warmth • ${v.acousticSignature.speakingRateWpm} WPM`
+                            : Object.values(v.labels).slice(0, 4).join(' • ') || v.category}
                         </div>
                       </div>
 
@@ -960,6 +1215,16 @@ export function InspectorPanel({
                         >
                           <Play className="w-3 h-3" />
                         </button>
+                        {!isPrimary && (
+                          <button
+                            type="button"
+                            onClick={() => void onAssignVoiceToAllScenes(v.voice_id)}
+                            className="px-2 py-1 rounded-lg text-[10px] font-semibold border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200"
+                            title="Bind as primary voice and apply to all scenes"
+                          >
+                            Set Active
+                          </button>
+                        )}
                         {activeScene && (
                           <button
                             type="button"
@@ -972,7 +1237,7 @@ export function InspectorPanel({
                                 : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700'
                             }`}
                           >
-                            {isSelected ? 'Active' : 'Use'}
+                            {isSelected ? 'Scene Active' : 'Scene'}
                           </button>
                         )}
                       </div>
@@ -1055,6 +1320,154 @@ export function InspectorPanel({
           </div>
         )}
 
+        {tab === 'sources' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                  Presentations &amp; NotebookLM Sources
+                </h3>
+                <p className="text-[11px] text-zinc-500">
+                  Import .pptx decks, Briefing Docs, or Audio Overviews
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenSourceImport}
+                className="inline-flex items-center gap-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 px-2.5 py-1.5 text-xs font-semibold text-white shrink-0"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Import
+              </button>
+            </div>
+
+            {sources.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/60 p-4 text-center space-y-2">
+                <BookOpen className="w-6 h-6 text-cyan-400 mx-auto" />
+                <div className="text-xs font-medium text-zinc-200">
+                  No PPTX or NotebookLM sources imported yet
+                </div>
+                <p className="text-[11px] text-zinc-500">
+                  Upload a PowerPoint deck or NotebookLM Briefing Doc to map slides &amp; speaker notes 1-to-1 into scenes.
+                </p>
+                <button
+                  type="button"
+                  onClick={onOpenSourceImport}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 px-3 py-1.5 text-xs font-medium text-cyan-200"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Import PPTX / NotebookLM
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {sources.map((src) => {
+                  const isExpanded = expandedSourceId === src.id;
+                  return (
+                    <div
+                      key={src.id}
+                      className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-2.5 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[9px] uppercase rounded px-1.5 py-0.5 bg-cyan-500/15 border border-cyan-500/35 text-cyan-200 font-semibold shrink-0">
+                              {src.sourceType}
+                            </span>
+                            <span className="text-xs font-semibold text-zinc-100 truncate">
+                              {src.name}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-zinc-400 mt-0.5">{src.summary}</div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedSourceId(isExpanded ? null : src.id)
+                            }
+                            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
+                            title={isExpanded ? 'Collapse slides' : 'View slides & notes'}
+                          >
+                            {isExpanded ? (
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteSource(src.id)}
+                            className="p-1 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-900"
+                            title="Delete source"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {src.audioUrl && (
+                        <audio src={src.audioUrl} controls className="w-full h-8" />
+                      )}
+
+                      {isExpanded && (
+                        <div className="space-y-1.5 pt-1 border-t border-zinc-800/80 max-h-56 overflow-y-auto">
+                          {src.slides.map((sl) => (
+                            <div
+                              key={sl.index}
+                              className="rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2 space-y-1"
+                            >
+                              <div className="text-[11px] font-semibold text-cyan-200">
+                                {sl.index}. {sl.title}
+                              </div>
+                              {sl.bullets.length > 0 && (
+                                <ul className="list-disc list-inside text-[10px] text-zinc-300 space-y-0.5">
+                                  {sl.bullets.slice(0, 3).map((b, bi) => (
+                                    <li key={bi} className="truncate">
+                                      {b}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                              {sl.speakerNotes && (
+                                <div className="text-[10px] text-zinc-400 italic line-clamp-2">
+                                  Notes: {sl.speakerNotes}
+                                </div>
+                              )}
+                              {sl.imageUrls.length > 0 && (
+                                <div className="flex gap-1.5 pt-0.5">
+                                  {sl.imageUrls.map((u) => (
+                                    <img
+                                      key={u}
+                                      src={u}
+                                      alt={sl.title}
+                                      className="w-14 h-9 rounded object-cover border border-zinc-700"
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={busyAction === 'generate'}
+                        onClick={() => void onGenerateFromSource(src)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/35 border border-indigo-500/40 py-1.5 text-[11px] font-semibold text-indigo-100 transition disabled:opacity-50"
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        Generate Explainer from Source ({src.slides.length} scenes)
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === 'assets' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
@@ -1066,14 +1479,28 @@ export function InspectorPanel({
                   Tech photos &amp; clips auto-retrieved for scenes &amp; prompts
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={onOpenAssetUpload}
-                className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1.5 text-xs font-medium text-white shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Add Asset
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {activeScene && (
+                  <button
+                    type="button"
+                    disabled={busyAction === 'generate-visual'}
+                    onClick={() => void onGenerateSceneVisual(activeScene.id, 'auto')}
+                    className="inline-flex items-center gap-1 rounded-lg bg-cyan-600/25 hover:bg-cyan-600/35 border border-cyan-500/40 px-2 py-1.5 text-[11px] font-medium text-cyan-200"
+                    title="Generate a native SVG diagram for the active scene"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    SVG
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onOpenAssetUpload}
+                  className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1.5 text-xs font-medium text-white shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add Asset
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2.5">

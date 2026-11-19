@@ -33,6 +33,23 @@ export type SceneVisualOverlay =
   | 'packet-stream'
   | 'wave-spectrum';
 
+export type SceneAnimationPreset =
+  | 'diagram-flow'
+  | 'kinetic-cards'
+  | 'slide-deck-reveal'
+  | 'data-pulse'
+  | 'split-comparison'
+  | 'timeline-walkthrough'
+  | 'particle-network';
+
+export type NativeVisualDiagramType =
+  | 'auto'
+  | 'architecture'
+  | 'flow'
+  | 'comparison'
+  | 'infographic'
+  | 'hardware';
+
 export interface CharacterTraits {
   wardrobe: string;
   lighting: string;
@@ -64,6 +81,16 @@ export interface VoiceTraits {
   cadence: 'measured' | 'conversational' | 'brisk';
 }
 
+export interface VoiceAcousticSignature {
+  f0Hz: number;
+  brightness: number;
+  warmth: number;
+  speakingRateWpm: number;
+  energyRms?: number;
+  durationSec?: number;
+  analyzedFromSample: boolean;
+}
+
 export interface TtsSpeechConfig {
   rate: number;
   pitch: number;
@@ -72,6 +99,8 @@ export interface TtsSpeechConfig {
   preferredVoices: string[];
   tone?: string;
   warmth?: number;
+  brightness?: number;
+  f0Hz?: number;
   cadence?: VoiceTraits['cadence'];
 }
 
@@ -98,6 +127,7 @@ export interface VoiceProfile {
   sampleMimeType?: string;
   playbackMode?: VoicePlaybackMode;
   traits?: VoiceTraits;
+  acousticSignature?: VoiceAcousticSignature;
   elevenlabsVoiceId?: string;
   pushStatus?: 'local' | 'pushed' | 'export-ready';
   createdAt?: string;
@@ -170,6 +200,10 @@ export interface SceneItem {
   narration: string;
   visualPrompt: string;
   visualOverlay: SceneVisualOverlay;
+  animationPreset?: SceneAnimationPreset;
+  generatedVisualUrl?: string;
+  sourceId?: string;
+  sourceSlideIndex?: number;
   cameraMotion: CameraMotionPreset;
   cinematicStyle: CinematicStyle;
   transitionIn: TransitionType;
@@ -185,6 +219,32 @@ export interface SceneItem {
   assetIds?: string[];
   ragContext?: RagContextMatch[];
   keyPoints: string[];
+}
+
+export type ImportedSourceType = 'pptx' | 'notebooklm-doc' | 'notebooklm-audio' | 'notes';
+
+export interface ImportedSourceSlide {
+  index: number;
+  title: string;
+  bullets: string[];
+  speakerNotes?: string;
+  imageUrls: string[];
+  rawText: string;
+}
+
+export interface ImportedSource {
+  id: string;
+  name: string;
+  sourceType: ImportedSourceType;
+  createdAt: string;
+  summary: string;
+  rawText: string;
+  slides: ImportedSourceSlide[];
+  mediaUrls: string[];
+  assetIds: string[];
+  audioUrl?: string;
+  audioDurationSec?: number;
+  tags: string[];
 }
 
 export interface ChapterItem {
@@ -206,6 +266,7 @@ export interface ProjectStateSnapshot {
   characters: CharacterProfile[];
   musicTracks: MusicTrack[];
   assetIds?: string[];
+  sourceIds?: string[];
 }
 
 export interface IterationSnapshot {
@@ -324,6 +385,25 @@ export interface GenerateProjectRequest {
   primaryVoiceId?: string;
   characterIds?: string[];
   assetIds?: string[];
+  sourceIds?: string[];
+  autoGenerateVisuals?: boolean;
+}
+
+export interface GenerateVisualRequest {
+  prompt: string;
+  title?: string;
+  keyPoints?: string[];
+  style?: CinematicStyle;
+  diagramType?: NativeVisualDiagramType;
+  projectId?: string;
+  sceneId?: string;
+}
+
+export interface GenerateVisualResponse {
+  asset: TechAsset;
+  visualUrl: string;
+  diagramType: Exclude<NativeVisualDiagramType, 'auto'>;
+  project?: ExplainerProject;
 }
 
 export interface DirectorPromptRequest {

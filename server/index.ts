@@ -7,6 +7,7 @@ import { createApiRouter } from './routes/api.js';
 import { AssetLibrary } from './store/assetLibrary.js';
 import { CredentialVault } from './store/credentialVault.js';
 import { ProjectStore } from './store/projectStore.js';
+import { SourceStore } from './store/sourceStore.js';
 import { VoiceStore } from './store/voiceStore.js';
 
 export interface CreateAppOptions {
@@ -19,11 +20,12 @@ export function createApp(options: CreateAppOptions = {}) {
   const vault = new CredentialVault(options.dataDir);
   const voiceStore = new VoiceStore(options.dataDir);
   const assetLibrary = new AssetLibrary(options.dataDir);
+  const sourceStore = new SourceStore(options.dataDir);
 
   app.use(cors());
   app.use(express.json({ limit: '4mb' }));
 
-  app.use('/api', createApiRouter(store, vault, voiceStore, assetLibrary));
+  app.use('/api', createApiRouter(store, vault, voiceStore, assetLibrary, sourceStore));
   app.use('/uploads', express.static(store.getUploadsDir()));
 
   const clientDistDir = path.resolve(process.cwd(), 'dist/client');
@@ -34,7 +36,7 @@ export function createApp(options: CreateAppOptions = {}) {
     });
   }
 
-  return { app, store, vault, voiceStore, assetLibrary };
+  return { app, store, vault, voiceStore, assetLibrary, sourceStore };
 }
 
 function resolveRealPath(filePath: string): string {
@@ -51,11 +53,12 @@ const isDirectRun =
 if (isDirectRun) {
   const port = Number(process.env.PORT || 3001);
   const host = process.env.HOST?.trim();
-  const { app, store, voiceStore, assetLibrary } = createApp();
+  const { app, store, voiceStore, assetLibrary, sourceStore } = createApp();
   Promise.all([
     store.ensureInitialized(),
     voiceStore.ensureInitialized(),
     assetLibrary.ensureInitialized(),
+    sourceStore.ensureInitialized(),
   ])
     .then(() => {
       const onListen = () => {

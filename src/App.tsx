@@ -8,7 +8,9 @@ import type {
   ConnectorTestResult,
   ExplainerProject,
   GenerateProjectRequest,
+  ImportedSource,
   MusicTrack,
+  NativeVisualDiagramType,
   PushVoiceElevenLabsResult,
   RagContextMatch,
   SceneItem,
@@ -56,6 +58,7 @@ import { IterationHistoryDrawer } from '@/components/IterationHistoryDrawer';
 import { MultiTrackTimeline } from '@/components/MultiTrackTimeline';
 import { PreviewPlayer } from '@/components/PreviewPlayer';
 import { ProviderConnectModal } from '@/components/ProviderConnectModal';
+import { SourceImportModal } from '@/components/SourceImportModal';
 import { TopBar, type WorkspaceView } from '@/components/TopBar';
 import { TopicGeneratorModal } from '@/components/TopicGeneratorModal';
 import { VoiceCloningModal } from '@/components/VoiceCloningModal';
@@ -71,6 +74,7 @@ export function App() {
   const [allCharacters, setAllCharacters] = useState<CharacterProfile[]>([]);
   const [presets, setPresets] = useState<CharacterProfile[]>([]);
   const [assets, setAssets] = useState<TechAsset[]>([]);
+  const [sources, setSources] = useState<ImportedSource[]>([]);
 
   const [sessionKeys, setSessionKeys] = useState<SessionConnectorKeys>(() =>
     loadSessionConnectorKeys()
@@ -99,6 +103,7 @@ export function App() {
   const [showCloneModal, setShowCloneModal] = useState(false);
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
+  const [showSourceModal, setShowSourceModal] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [connectModalId, setConnectModalId] = useState<ConnectorId | null>(null);
 
@@ -114,13 +119,14 @@ export function App() {
   const voiceCacheRef = useRef<
     Map<
       string,
-      | {
+      |         {
           kind: 'audio';
           blobUrl: string;
           blob: Blob;
           contentType: string;
           source: 'elevenlabs' | 'native' | 'mock';
           synthesisMode?: string;
+          dspShaped?: boolean;
         }
       | {
           kind: 'speech-synthesis';
@@ -154,21 +160,23 @@ export function App() {
     []
   );
 
-  // Load projects, characters, and assets once on mount
+  // Load projects, characters, assets, and imported sources once on mount
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const [projRes, charRes, assetRes] = await Promise.all([
+        const [projRes, charRes, assetRes, sourceRes] = await Promise.all([
           studioApi.listProjects(),
           studioApi.listCharacters(),
           studioApi.listAssets(),
+          studioApi.listSources(),
         ]);
         if (!mounted) return;
         setProjects(projRes.projects);
         setAllCharacters(charRes.characters);
         setPresets(charRes.presets);
         setAssets(assetRes.assets);
+        setSources(sourceRes.sources);
         if (projRes.projects[0]) {
           setActiveProjectId(projRes.projects[0].id);
           setActiveSceneId(projRes.projects[0].scenes[0]?.id || '');
@@ -334,7 +342,11 @@ export function App() {
               ? 'elevenlabs'
               : 'system-speech'
         );
-        void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec, voiceObj?.traits);
+        void playVoiceBlobUrl(cached.blobUrl, 0.9, localOffsetSec, {
+          ...voiceObj?.traits,
+          acousticSignature: voiceObj?.acousticSignature,
+          dspShaped: cached.dspShaped,
+        });
       }
       return () => {
         cancelled = true;
@@ -390,6 +402,7 @@ export function App() {
           contentType: res.contentType,
           source: normalizedSource,
           synthesisMode: res.synthesisMode,
+          dspShaped: res.dspShaped,
         });
         setActiveVoiceSource(normalizedSource);
         setActiveVoiceMode(
@@ -399,12 +412,11 @@ export function App() {
               ? 'elevenlabs'
               : 'system-speech'
         );
-        const playback = await playVoiceBlobUrl(
-          res.blobUrl,
-          0.9,
-          localOffsetSec,
-          voiceObj?.traits
-        );
+        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, localOffsetSec, {
+          ...voiceObj?.traits,
+          acousticSignature: voiceObj?.acousticSignature,
+          dspShaped: res.dspShaped,
+        });
         if (!playback.ok && playback.error && !cancelled) {
           setErrorBanner(`Audio playback blocked: ${playback.error}`);
         }
@@ -503,7 +515,13 @@ export function App() {
     setBusyAction('generate');
     setErrorBanner(null);
     try {
-      const { project } = await studioApi.generateProject(payload, sessionKeys);
+      const [{ project }, assetRes] = await Promise.all([
+        studioApi.generateProject(payload, sessionKeys),
+        studioApi.listAssets(),
+      ]);
+      // Refresh assets after generation so auto-generated SVGs appear in Assets & Canvas
+      const latestAssets = await studioApi.listAssets();
+      setAssets(latestAssets.assets || assetRes.assets);
       upsertProject(project);
       setCurrentTimeSec(0);
       setIsPlaying(false);
@@ -692,7 +710,11 @@ export function App() {
               ? 'elevenlabs'
               : 'system-speech'
         );
-        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, 0, voiceObj?.traits);
+        const playback = await playVoiceBlobUrl(res.blobUrl, 0.9, 0, {
+          ...voiceObj?.traits,
+          acousticSignature: voiceObj?.acousticSignature,
+          dspShaped: res.dspShaped,
+        });
         if (!playback.ok && playback.error) {
           setErrorBanner(`Audio playback failed: ${playback.error}`);
         }
@@ -862,15 +884,23 @@ export function App() {
       );
 
       let voiceBlob: Blob | undefined;
+      let voiceDspShaped = false;
       if (speech.kind === 'audio') {
         voiceBlob = speech.blob;
+        voiceDspShaped = Boolean(speech.dspShaped);
         URL.revokeObjectURL(speech.blobUrl);
       }
 
+      const activeVoiceObj = voices.find((v) => v.voice_id === params.scene.voiceId);
       const exported = await exportCanvasWithAudioWebm({
         canvas: params.canvas,
         voiceBlob,
         durationSec: params.scene.durationSec,
+        voiceTraits: {
+          warmth: activeVoiceObj?.acousticSignature?.warmth ?? activeVoiceObj?.traits?.warmth,
+          brightness: activeVoiceObj?.acousticSignature?.brightness,
+          dspShaped: voiceDspShaped,
+        },
       });
       triggerBlobDownload(exported.blob, `${sanitizeFilename(params.scene.title)}.webm`);
       setLastActionSummary(
@@ -885,23 +915,160 @@ export function App() {
     }
   };
 
-  const handleCloneVoice = async (formData: FormData) => {
+  const handleCloneVoice = async (
+    formData: FormData,
+    options?: { setAsActiveExplainerVoice: boolean }
+  ) => {
     setBusyAction('clone-voice');
     try {
-      const { voice } = await studioApi.cloneVoice(formData);
+      const { voice, project: serverUpdatedProject } = await studioApi.cloneVoice(formData);
       clearVoiceCache();
       lastSpokenSceneKeyRef.current = null;
       await refreshConnectorsAndVoices(sessionKeys, demoPrefs);
-      if (activeProject && activeScene) {
+      const shouldActivate = options?.setAsActiveExplainerVoice ?? true;
+      if (serverUpdatedProject) {
+        upsertProject(serverUpdatedProject);
+      } else if (activeProject && shouldActivate) {
+        const updated = await studioApi.setProjectPrimaryVoice(
+          activeProject.id,
+          voice.voice_id,
+          true
+        );
+        upsertProject(updated.project);
+      } else if (activeProject && activeScene) {
         const updated = await studioApi.updateScene(activeProject.id, activeScene.id, {
           voiceId: voice.voice_id,
         });
         upsertProject(updated.project);
       }
-      setLastActionSummary(`Cloned native voice "${voice.name}" and assigned to active scene`);
+      setLastActionSummary(
+        shouldActivate
+          ? `Cloned "${voice.name}" and activated as explainer voice across all scenes`
+          : `Cloned native voice "${voice.name}"`
+      );
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const handleUploadSceneVoiceTake = async (sceneId: string, file: File) => {
+    if (!activeProject) return;
+    setBusyAction('voice-take');
+    setErrorBanner(null);
+    try {
+      const fd = new FormData();
+      fd.append('audio', file);
+      const { project } = await studioApi.uploadSceneVoiceTake(activeProject.id, sceneId, fd);
+      upsertProject(project);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
+      setLastActionSummary('Attached recorded voice take to scene');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to attach scene voice take.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDeleteSceneVoiceTake = async (sceneId: string) => {
+    if (!activeProject) return;
+    setBusyAction('voice-take');
+    try {
+      const { project } = await studioApi.deleteSceneVoiceTake(activeProject.id, sceneId);
+      upsertProject(project);
+      clearVoiceCache();
+      lastSpokenSceneKeyRef.current = null;
+      setLastActionSummary('Cleared per-scene voice take');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to clear scene voice take.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleGenerateSceneVisual = async (
+    sceneId: string,
+    diagramType: NativeVisualDiagramType
+  ) => {
+    if (!activeProject) return;
+    const sc = activeProject.scenes.find((s) => s.id === sceneId);
+    if (!sc) return;
+    setBusyAction('generate-visual');
+    setErrorBanner(null);
+    try {
+      const res = await studioApi.generateNativeVisual({
+        prompt: sc.visualPrompt,
+        title: sc.title,
+        keyPoints: sc.keyPoints,
+        style: sc.cinematicStyle,
+        diagramType,
+        projectId: activeProject.id,
+        sceneId: sc.id,
+      });
+      setAssets((prev) => [res.asset, ...prev.filter((a) => a.id !== res.asset.id)]);
+      if (res.project) {
+        upsertProject(res.project);
+      }
+      setLastActionSummary(`Generated native ${res.diagramType} SVG visual for "${sc.title}"`);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Native visual generation failed.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleGenerateFromSource = async (source: ImportedSource) => {
+    await handleGenerateProject({
+      topic: source.name,
+      durationMinutes: Math.max(1, Math.min(30, Math.ceil(source.slides.length * 0.5))),
+      audience: activeProject?.audience || 'engineering',
+      primaryVoiceId: activeProject?.primaryVoiceId || activeScene?.voiceId,
+      sourceIds: [source.id],
+      autoGenerateVisuals: true,
+    });
+  };
+
+  const handleImportPptxSource = async (formData: FormData, autoGenerate?: boolean) => {
+    setBusyAction('import-source');
+    setErrorBanner(null);
+    try {
+      const { source } = await studioApi.importPptxSource(formData);
+      setSources((prev) => [source, ...prev]);
+      const latestAssets = await studioApi.listAssets();
+      setAssets(latestAssets.assets);
+      setLastActionSummary(`Imported PPTX "${source.name}" (${source.slides.length} slides)`);
+      if (autoGenerate) {
+        await handleGenerateFromSource(source);
+      }
+      return source;
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleImportNotebookLmSource = async (
+    payload: FormData | { name?: string; rawText: string },
+    autoGenerate?: boolean
+  ) => {
+    setBusyAction('import-source');
+    setErrorBanner(null);
+    try {
+      const { source } = await studioApi.importNotebookLmSource(payload);
+      setSources((prev) => [source, ...prev]);
+      setLastActionSummary(`Imported NotebookLM source "${source.name}" (${source.slides.length} sections)`);
+      if (autoGenerate) {
+        await handleGenerateFromSource(source);
+      }
+      return source;
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDeleteSource = async (sourceId: string) => {
+    await studioApi.deleteSource(sourceId);
+    setSources((prev) => prev.filter((s) => s.id !== sourceId));
+    setLastActionSummary('Removed imported source');
   };
 
   const handlePushVoiceToElevenLabs = async (voiceId: string) => {
@@ -1079,17 +1246,12 @@ export function App() {
     if (!activeProject) return;
     setBusyAction('assign-voices');
     try {
-      let latestProject = activeProject;
-      for (const sc of activeProject.scenes) {
-        if (sc.voiceId !== voiceId) {
-          const res = await studioApi.updateScene(activeProject.id, sc.id, { voiceId });
-          latestProject = res.project;
-        }
-      }
-      upsertProject(latestProject);
+      const res = await studioApi.setProjectPrimaryVoice(activeProject.id, voiceId, true);
+      upsertProject(res.project);
       clearVoiceCache();
       lastSpokenSceneKeyRef.current = null;
-      setLastActionSummary('Applied selected voice to all scenes');
+      const voiceName = voices.find((v) => v.voice_id === voiceId)?.name || voiceId;
+      setLastActionSummary(`Activated "${voiceName}" as explainer voice across all scenes`);
     } finally {
       setBusyAction(null);
     }
@@ -1235,6 +1397,7 @@ export function App() {
               connectors={connectors}
               allCharacters={allCharacters}
               assets={assets}
+              sources={sources}
               lastVoicePushResult={lastVoicePushResult}
               onUpdateScene={handleUpdateScene}
               onTriggerHiggsfield={handleTriggerHiggsfield}
@@ -1247,10 +1410,16 @@ export function App() {
               onPushVoiceToElevenLabs={handlePushVoiceToElevenLabs}
               onSyncElevenLabsVoices={handleSyncElevenLabsVoices}
               onAssignVoiceToAllScenes={handleAssignVoiceToAllScenes}
+              onUploadSceneVoiceTake={handleUploadSceneVoiceTake}
+              onDeleteSceneVoiceTake={handleDeleteSceneVoiceTake}
+              onGenerateSceneVisual={handleGenerateSceneVisual}
               onOpenConnectModal={(id) => setConnectModalId(id)}
               onOpenCharacterClone={() => setShowCloneModal(true)}
               onOpenVoiceClone={() => setShowVoiceModal(true)}
               onOpenAssetUpload={() => setShowAssetModal(true)}
+              onOpenSourceImport={() => setShowSourceModal(true)}
+              onDeleteSource={handleDeleteSource}
+              onGenerateFromSource={handleGenerateFromSource}
               onDeleteAsset={handleDeleteAsset}
               onAddMusicTrack={handleAddMusicTrack}
               onDeleteMusicTrack={handleDeleteMusicTrack}
@@ -1281,9 +1450,11 @@ export function App() {
       <TopicGeneratorModal
         open={showNewModal}
         voices={voices}
-        activeVoiceId={activeScene?.voiceId}
+        sources={sources}
+        activeVoiceId={activeProject.primaryVoiceId || activeScene?.voiceId}
         onClose={() => setShowNewModal(false)}
         onGenerate={handleGenerateProject}
+        onOpenSourceImport={() => setShowSourceModal(true)}
         busy={busyAction === 'generate'}
       />
 
@@ -1299,9 +1470,18 @@ export function App() {
 
       <VoiceCloningModal
         open={showVoiceModal}
+        projectId={activeProject.id}
         onClose={() => setShowVoiceModal(false)}
         onCloneVoice={handleCloneVoice}
         busy={busyAction === 'clone-voice'}
+      />
+
+      <SourceImportModal
+        open={showSourceModal}
+        onClose={() => setShowSourceModal(false)}
+        onImportPptx={handleImportPptxSource}
+        onImportNotebookLm={handleImportNotebookLmSource}
+        busy={busyAction === 'import-source' || busyAction === 'generate'}
       />
 
       <AssetUploadModal

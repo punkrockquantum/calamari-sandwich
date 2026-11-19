@@ -3,7 +3,10 @@ import type {
   DirectorPromptResult,
   ExplainerProject,
   GenerateProjectRequest,
+  GenerateVisualRequest,
+  GenerateVisualResponse,
   HiggsfieldJobState,
+  ImportedSource,
   MusicTrack,
   ProviderStatus,
   PushVoiceElevenLabsResult,
@@ -74,6 +77,35 @@ export const studioApi = {
       {
         method: 'PATCH',
         body: JSON.stringify(patch),
+      }
+    );
+  },
+
+  setProjectPrimaryVoice(projectId: string, voiceId: string, applyToAllScenes = true) {
+    return requestJson<{ project: ExplainerProject }>(
+      `/api/projects/${encodeURIComponent(projectId)}/primary-voice`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ voiceId, applyToAllScenes }),
+      }
+    );
+  },
+
+  uploadSceneVoiceTake(projectId: string, sceneId: string, formData: FormData) {
+    return requestJson<{ project: ExplainerProject; scene: SceneItem; voiceAudioUrl: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/voice-take`,
+      {
+        method: 'POST',
+        body: formData,
+      }
+    );
+  },
+
+  deleteSceneVoiceTake(projectId: string, sceneId: string) {
+    return requestJson<{ project: ExplainerProject; scene: SceneItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/scenes/${encodeURIComponent(sceneId)}/voice-take`,
+      {
+        method: 'DELETE',
       }
     );
   },
@@ -173,6 +205,7 @@ export const studioApi = {
         contentType: string;
         source: string;
         synthesisMode?: string;
+        dspShaped?: boolean;
         fallbackReason?: string;
       }
     | {
@@ -197,6 +230,7 @@ export const studioApi = {
     const contentType = res.headers.get('content-type') || 'audio/wav';
     const source = res.headers.get('X-Voice-Source') || 'mock';
     const synthesisMode = res.headers.get('X-Voice-Synthesis-Mode') || undefined;
+    const dspShaped = res.headers.get('X-Voice-Dsp-Shaped') === 'true';
     const fallbackReason = res.headers.get('X-Voice-Fallback-Reason') || undefined;
 
     if (contentType.includes('application/json')) {
@@ -217,6 +251,7 @@ export const studioApi = {
       contentType,
       source,
       synthesisMode,
+      dspShaped,
       fallbackReason,
     };
   },
@@ -257,7 +292,7 @@ export const studioApi = {
   },
 
   cloneVoice(formData: FormData) {
-    return requestJson<{ voice: VoiceProfile }>('/api/voices/clone', {
+    return requestJson<{ voice: VoiceProfile; project?: ExplainerProject }>('/api/voices/clone', {
       method: 'POST',
       body: formData,
     });
@@ -311,6 +346,51 @@ export const studioApi = {
       method: 'POST',
       body: JSON.stringify({ query, projectId, limit }),
     });
+  },
+
+  generateNativeVisual(payload: GenerateVisualRequest) {
+    return requestJson<GenerateVisualResponse>('/api/assets/generate-visual', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  listSources() {
+    return requestJson<{ sources: ImportedSource[] }>('/api/sources');
+  },
+
+  importPptxSource(formData: FormData) {
+    return requestJson<{ source: ImportedSource }>('/api/sources/import-pptx', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  importNotebookLmSource(payload: FormData | { name?: string; rawText: string }) {
+    if (payload instanceof FormData) {
+      return requestJson<{ source: ImportedSource }>('/api/sources/import-notebooklm', {
+        method: 'POST',
+        body: payload,
+      });
+    }
+    return requestJson<{ source: ImportedSource }>('/api/sources/import-notebooklm', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  importUnifiedSource(formData: FormData) {
+    return requestJson<{ source: ImportedSource }>('/api/sources/import', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  deleteSource(sourceId: string) {
+    return requestJson<{ deleted: boolean }>(
+      `/api/sources/${encodeURIComponent(sourceId)}`,
+      { method: 'DELETE' }
+    );
   },
 
   pushSceneToProvider(

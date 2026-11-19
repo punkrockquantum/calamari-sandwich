@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { VoiceProfile, VoiceTraits } from '../../shared/types.js';
+import type { VoiceAcousticSignature, VoiceProfile, VoiceTraits } from '../../shared/types.js';
 
 export const ALLOWED_VOICE_AUDIO_MIMES = new Set([
   'audio/wav',
@@ -168,7 +168,9 @@ export class VoiceStore {
     sampleMimeType?: string;
     playbackMode?: 'speak-script' | 'direct-sample';
     traits: VoiceTraits;
+    acousticSignature?: VoiceAcousticSignature;
   }): Promise<VoiceProfile> {
+    const sig = params.acousticSignature;
     const voice: VoiceProfile = {
       voice_id: `native-${crypto.randomUUID().slice(0, 8)}`,
       name: params.name.trim(),
@@ -179,14 +181,16 @@ export class VoiceStore {
         pitch: params.traits.pitch,
         cadence: params.traits.cadence,
         warmth: `${params.traits.warmth}%`,
+        ...(sig ? { f0: `${sig.f0Hz}Hz`, rate: `${sig.speakingRateWpm}wpm` } : {}),
       },
       description:
         params.description?.trim() ||
-        `Native voice (${params.traits.tone}, ${params.traits.pitch} pitch, ${params.traits.cadence} cadence).`,
+        `Native voice (${params.traits.tone}, ${params.traits.pitch} pitch, ${params.traits.cadence} cadence${sig ? `, ${sig.f0Hz} Hz` : ''}).`,
       sampleUrl: params.sampleUrl,
       sampleMimeType: params.sampleMimeType,
       playbackMode: params.playbackMode || 'speak-script',
       traits: params.traits,
+      acousticSignature: sig,
       pushStatus: 'local',
       createdAt: new Date().toISOString(),
     };

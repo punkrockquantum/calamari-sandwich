@@ -28,6 +28,8 @@ export function extractProjectSnapshot(project: ExplainerProject): ProjectStateS
     scenes: project.scenes,
     characters: project.characters,
     musicTracks: project.musicTracks,
+    assetIds: project.assetIds,
+    sourceIds: project.sourceIds,
   });
 }
 
