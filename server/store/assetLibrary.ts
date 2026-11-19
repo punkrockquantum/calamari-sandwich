@@ -8,6 +8,7 @@ import {
   MAX_FILE_BYTES,
   MAX_PHOTOS,
   MAX_VIDEOS,
+  normalizeMediaMimeType,
   type UploadedMediaFile,
 } from '../services/characterService.js';
 
@@ -95,9 +96,13 @@ export function validateAssetUpload(
       return { valid: false, error: `File "${f.originalname}" exceeds the 25MB limit.` };
     }
   }
-  const images = files.filter((f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype));
-  const videos = files.filter((f) => ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype));
-  const invalid = files.filter(
+  const normalizedFiles = files.map((f) => ({
+    ...f,
+    mimetype: normalizeMediaMimeType(f.mimetype, f.originalname),
+  }));
+  const images = normalizedFiles.filter((f) => ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype));
+  const videos = normalizedFiles.filter((f) => ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype));
+  const invalid = normalizedFiles.filter(
     (f) => !ALLOWED_IMAGE_MIME_TYPES.has(f.mimetype) && !ALLOWED_VIDEO_MIME_TYPES.has(f.mimetype)
   );
   if (invalid.length > 0) {

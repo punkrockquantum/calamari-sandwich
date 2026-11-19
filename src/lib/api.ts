@@ -51,6 +51,10 @@ export const studioApi = {
     return requestJson<{ projects: ExplainerProject[] }>('/api/projects');
   },
 
+  getProject(id: string) {
+    return requestJson<{ project: ExplainerProject }>(`/api/projects/${encodeURIComponent(id)}`);
+  },
+
   generateProject(payload: GenerateProjectRequest, keys?: Partial<SessionConnectorKeys>) {
     return requestJson<{ project: ExplainerProject }>(
       '/api/projects/generate',
@@ -153,7 +157,13 @@ export const studioApi = {
   async synthesizeSpeech(
     params: { voiceId: string; text: string; projectId?: string; sceneId?: string },
     keys?: Partial<SessionConnectorKeys>
-  ): Promise<{ blobUrl: string; source: string; fallbackReason?: string }> {
+  ): Promise<{
+    blobUrl: string;
+    blob: Blob;
+    contentType: string;
+    source: string;
+    fallbackReason?: string;
+  }> {
     const res = await fetch('/api/tts', {
       method: 'POST',
       headers: {
@@ -166,12 +176,23 @@ export const studioApi = {
       const err = await res.json().catch(() => ({ error: 'TTS failed' }));
       throw new Error(err.error || 'TTS failed');
     }
+    const contentType = res.headers.get('content-type') || 'audio/wav';
     const blob = await res.blob();
     return {
       blobUrl: URL.createObjectURL(blob),
+      blob,
+      contentType,
       source: res.headers.get('X-Voice-Source') || 'mock',
       fallbackReason: res.headers.get('X-Voice-Fallback-Reason') || undefined,
     };
+  },
+
+  getProviderVideoProxyUrl(
+    projectId: string,
+    sceneId: string,
+    provider: 'higgsfield' | 'gemini_veo'
+  ) {
+    return `/api/providers/video-proxy/${encodeURIComponent(projectId)}/${encodeURIComponent(sceneId)}/${encodeURIComponent(provider)}`;
   },
 
   generateHiggsfieldScene(

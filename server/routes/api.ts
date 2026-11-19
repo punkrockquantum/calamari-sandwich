@@ -15,6 +15,7 @@ import {
   MAX_FILE_BYTES,
   PRESET_CHARACTERS,
   buildClonedCharacter,
+  normalizeMediaMimeType,
   validateCharacterUpload,
 } from '../services/characterService.js';
 import {
@@ -52,7 +53,13 @@ import { generateExplainerProject } from '../services/scriptGenerator.js';
 import { AssetLibrary, validateAssetUpload } from '../store/assetLibrary.js';
 import type { CredentialVault } from '../store/credentialVault.js';
 import type { ProjectStore } from '../store/projectStore.js';
-import { ALLOWED_VOICE_AUDIO_MIMES, VoiceStore } from '../store/voiceStore.js';
+import {
+  ALLOWED_VOICE_AUDIO_MIMES,
+  VoiceStore,
+  inferVoiceExtension,
+  normalizeMimeType,
+  resolveVoiceSampleMimeType,
+} from '../store/voiceStore.js';
 
 const GenerateProjectSchema = z.object({
   topic: z.string().min(2).max(300),
@@ -187,7 +194,23 @@ export function createApiRouter(
         }
       },
       filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '') || '.bin';
+        const rawExt = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '');
+        const norm = normalizeMediaMimeType(file.mimetype, file.originalname);
+        const inferred =
+          norm === 'image/png'
+            ? '.png'
+            : norm === 'image/jpeg' || norm === 'image/jpg'
+              ? '.jpg'
+              : norm === 'image/webp'
+                ? '.webp'
+                : norm === 'video/mp4'
+                  ? '.mp4'
+                  : norm === 'video/webm'
+                    ? '.webm'
+                    : norm === 'video/quicktime'
+                      ? '.mov'
+                      : '.bin';
+        const ext = rawExt || inferred;
         cb(null, `char-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${ext}`);
       },
     }),
@@ -196,10 +219,8 @@ export function createApiRouter(
       files: 6,
     },
     fileFilter: (_req, file, cb) => {
-      if (
-        ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype) ||
-        ALLOWED_VIDEO_MIME_TYPES.has(file.mimetype)
-      ) {
+      const norm = normalizeMediaMimeType(file.mimetype, file.originalname);
+      if (ALLOWED_IMAGE_MIME_TYPES.has(norm) || ALLOWED_VIDEO_MIME_TYPES.has(norm)) {
         cb(null, true);
       } else {
         cb(new Error(`Unsupported file type "${file.mimetype}".`));
@@ -218,7 +239,7 @@ export function createApiRouter(
         }
       },
       filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '') || '.wav';
+        const ext = inferVoiceExtension(file.mimetype, file.originalname);
         cb(null, `voice-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${ext}`);
       },
     }),
@@ -227,7 +248,8 @@ export function createApiRouter(
       files: 1,
     },
     fileFilter: (_req, file, cb) => {
-      if (ALLOWED_VOICE_AUDIO_MIMES.has(file.mimetype)) {
+      const resolvedMime = resolveVoiceSampleMimeType(file.mimetype, file.originalname);
+      if (resolvedMime && ALLOWED_VOICE_AUDIO_MIMES.has(resolvedMime)) {
         cb(null, true);
       } else {
         cb(new Error(`Unsupported voice sample type "${file.mimetype}".`));
@@ -246,7 +268,23 @@ export function createApiRouter(
         }
       },
       filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '') || '.bin';
+        const rawExt = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '');
+        const norm = normalizeMediaMimeType(file.mimetype, file.originalname);
+        const inferred =
+          norm === 'image/png'
+            ? '.png'
+            : norm === 'image/jpeg' || norm === 'image/jpg'
+              ? '.jpg'
+              : norm === 'image/webp'
+                ? '.webp'
+                : norm === 'video/mp4'
+                  ? '.mp4'
+                  : norm === 'video/webm'
+                    ? '.webm'
+                    : norm === 'video/quicktime'
+                      ? '.mov'
+                      : '.bin';
+        const ext = rawExt || inferred;
         cb(null, `asset-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${ext}`);
       },
     }),
@@ -255,10 +293,8 @@ export function createApiRouter(
       files: 6,
     },
     fileFilter: (_req, file, cb) => {
-      if (
-        ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype) ||
-        ALLOWED_VIDEO_MIME_TYPES.has(file.mimetype)
-      ) {
+      const norm = normalizeMediaMimeType(file.mimetype, file.originalname);
+      if (ALLOWED_IMAGE_MIME_TYPES.has(norm) || ALLOWED_VIDEO_MIME_TYPES.has(norm)) {
         cb(null, true);
       } else {
         cb(new Error(`Unsupported asset file type "${file.mimetype}".`));
@@ -400,10 +436,13 @@ export function createApiRouter(
         store.listCharacters(),
         assetLibrary.listAssets(),
       ]);
+      const customChars = allChars.filter((c) => !c.isPreset);
+      const presetChars = allChars.filter((c) => c.isPreset);
+      const defaultChars = [...customChars, ...presetChars].slice(0, 4);
       const selectedChars =
         parsed.data.characterIds && parsed.data.characterIds.length > 0
           ? allChars.filter((c) => parsed.data.characterIds!.includes(c.id))
-          : allChars.slice(0, 3);
+          : defaultChars;
 
       const project = generateExplainerProject({
         topic: parsed.data.topic,
@@ -579,70 +618,60 @@ export function createApiRouter(
         return;
       }
 
-      const allAssets = await assetLibrary.listAssets();
-      const result = applyDirectorPrompt(project, parsed.data.prompt, allAssets);
+      const [allAssets, voiceRes] = await Promise.all([
+        assetLibrary.listAssets(),
+        listElevenLabsVoices(getHeaderKey(req, 'x-elevenlabs-key'), vault, voiceStore),
+      ]);
+      const result = applyDirectorPrompt(project, parsed.data.prompt, allAssets, voiceRes.voices);
 
       if (result.higgsfieldTargetSceneIds && result.higgsfieldTargetSceneIds.length > 0) {
-        const hfKey = resolveHiggsfieldKey(getHeaderKey(req, 'x-higgsfield-key'), vault, {
-          sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
-          sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
-          sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
-        });
-        if (hfKey.key) {
-          for (const targetSceneId of result.higgsfieldTargetSceneIds) {
-            const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
-            if (!targetScene) continue;
-            const char = result.project.characters.find((c) => c.id === targetScene.characterId);
-            const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
-            const jobState = await generateHiggsfieldScene({
-              scene: targetScene,
-              character: char,
-              assets: attachedAssets,
-              sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
-              sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
-              sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
-              sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
-              vault,
-            });
-            targetScene.higgsfield = jobState;
-            targetScene.activeVideoProvider = 'higgsfield';
-            result.actions.push(
-              `Submitted Higgsfield render (${jobState.status}) for "${targetScene.title}"`
-            );
-          }
-          result.summary = result.actions.join('; ');
+        for (const targetSceneId of result.higgsfieldTargetSceneIds) {
+          const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
+          if (!targetScene) continue;
+          const char = result.project.characters.find((c) => c.id === targetScene.characterId);
+          const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
+          const jobState = await generateHiggsfieldScene({
+            scene: targetScene,
+            character: char,
+            assets: attachedAssets,
+            sessionHeaderKey: getHeaderKey(req, 'x-higgsfield-key'),
+            sessionSecret: getHeaderKey(req, 'x-higgsfield-secret'),
+            sessionEndpoint: getHeaderKey(req, 'x-higgsfield-endpoint'),
+            sessionModel: getHeaderKey(req, 'x-higgsfield-model'),
+            vault,
+          });
+          targetScene.higgsfield = jobState;
+          targetScene.activeVideoProvider = 'higgsfield';
+          result.actions.push(
+            `Submitted Higgsfield render (${jobState.status}) for "${targetScene.title}"`
+          );
         }
+        result.summary = result.actions.join('; ');
       }
 
       if (result.veoTargetSceneIds && result.veoTargetSceneIds.length > 0) {
-        const veoKey = resolveGeminiVeoKey(getHeaderKey(req, 'x-gemini-veo-key'), vault, {
-          sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
-          sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
-        });
-        if (veoKey.key) {
-          for (const targetSceneId of result.veoTargetSceneIds) {
-            const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
-            if (!targetScene) continue;
-            const char = result.project.characters.find((c) => c.id === targetScene.characterId);
-            const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
-            const jobState = await generateGeminiVeoScene({
-              scene: targetScene,
-              character: char,
-              assets: attachedAssets,
-              uploadsRootDir: store.getUploadsDir(),
-              sessionHeaderKey: getHeaderKey(req, 'x-gemini-veo-key'),
-              sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
-              sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
-              vault,
-            });
-            targetScene.veo = jobState;
-            targetScene.activeVideoProvider = 'gemini_veo';
-            result.actions.push(
-              `Pushed to Gemini Veo (${jobState.status}) for "${targetScene.title}"`
-            );
-          }
-          result.summary = result.actions.join('; ');
+        for (const targetSceneId of result.veoTargetSceneIds) {
+          const targetScene = result.project.scenes.find((s) => s.id === targetSceneId);
+          if (!targetScene) continue;
+          const char = result.project.characters.find((c) => c.id === targetScene.characterId);
+          const attachedAssets = allAssets.filter((a) => targetScene.assetIds?.includes(a.id));
+          const jobState = await generateGeminiVeoScene({
+            scene: targetScene,
+            character: char,
+            assets: attachedAssets,
+            uploadsRootDir: store.getUploadsDir(),
+            sessionHeaderKey: getHeaderKey(req, 'x-gemini-veo-key'),
+            sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+            sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+            vault,
+          });
+          targetScene.veo = jobState;
+          targetScene.activeVideoProvider = 'gemini_veo';
+          result.actions.push(
+            `Pushed to Gemini Veo (${jobState.status}) for "${targetScene.title}"`
+          );
         }
+        result.summary = result.actions.join('; ');
       }
 
       const saved = await store.saveProject(result.project);
@@ -870,6 +899,10 @@ export function createApiRouter(
 
         const file = req.file as Express.Multer.File | undefined;
         const sampleUrl = file ? `/uploads/voices/${path.basename(file.path)}` : undefined;
+        const sampleMimeType = file
+          ? resolveVoiceSampleMimeType(file.mimetype, file.originalname) ||
+            normalizeMimeType(file.mimetype)
+          : undefined;
         const description =
           typeof req.body?.description === 'string' ? req.body.description : undefined;
 
@@ -877,7 +910,7 @@ export function createApiRouter(
           name,
           description,
           sampleUrl,
-          sampleMimeType: file?.mimetype,
+          sampleMimeType,
           traits,
         });
 
@@ -1280,6 +1313,81 @@ export function createApiRouter(
       scene.higgsfield = job;
       const saved = await store.saveProject(project);
       res.json({ project: saved, job, provider: 'higgsfield' });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Authenticated Video Proxy for provider-generated videos (e.g. Gemini Veo download URIs requiring x-goog-api-key)
+  router.get('/providers/video-proxy/:projectId/:sceneId/:provider', async (req, res, next) => {
+    try {
+      const provider = req.params.provider;
+      if (provider !== 'higgsfield' && provider !== 'gemini_veo') {
+        res.status(400).json({ error: `Unsupported video provider "${provider}".` });
+        return;
+      }
+      const project = await store.getProject(req.params.projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      const scene = project.scenes.find((s) => s.id === req.params.sceneId);
+      if (!scene) {
+        res.status(404).json({ error: 'Scene not found.' });
+        return;
+      }
+      const job = provider === 'gemini_veo' ? scene.veo : scene.higgsfield;
+      const videoUrl = job?.videoUrl;
+      if (!videoUrl) {
+        res.status(404).json({ error: 'No generated video URL for this scene.' });
+        return;
+      }
+
+      const headers: Record<string, string> = {};
+      if (req.headers.range) {
+        headers.Range = req.headers.range;
+      }
+      if (provider === 'gemini_veo') {
+        const veo = resolveGeminiVeoKey(getHeaderKey(req, 'x-gemini-veo-key'), vault, {
+          sessionEndpoint: getHeaderKey(req, 'x-gemini-veo-endpoint'),
+          sessionModel: getHeaderKey(req, 'x-gemini-veo-model'),
+        });
+        const endpointOrigin = (() => {
+          try {
+            return new URL(job.endpoint || veo.endpoint).origin;
+          } catch {
+            return '';
+          }
+        })();
+        if (
+          veo.key &&
+          (videoUrl.includes('googleapis.com') ||
+            (endpointOrigin && videoUrl.startsWith(endpointOrigin)))
+        ) {
+          headers['x-goog-api-key'] = veo.key;
+        }
+      }
+
+      const upstream = await fetch(videoUrl, {
+        headers,
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!upstream.ok && upstream.status !== 206) {
+        res.status(upstream.status).json({ error: `Upstream video fetch failed (HTTP ${upstream.status}).` });
+        return;
+      }
+
+      res.status(upstream.status);
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'video/mp4');
+      const contentLength = upstream.headers.get('content-length');
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      const contentRange = upstream.headers.get('content-range');
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      const acceptRanges = upstream.headers.get('accept-ranges');
+      if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.send(buf);
     } catch (err) {
       next(err);
     }

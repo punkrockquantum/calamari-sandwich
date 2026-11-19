@@ -167,7 +167,8 @@ export function generateExplainerProject(params: {
   const topic = params.topic.trim() || 'How Transformer Attention Powers Modern AI';
   const durationMinutes = Math.max(1, Math.min(30, Math.round(params.durationMinutes || 5)));
   const audience: AudienceLevel = params.audience || 'engineering';
-  const primaryVoiceId = params.primaryVoiceId || 'mock-rachel';
+  const explicitVoice = params.primaryVoiceId?.trim();
+  const primaryVoiceId = explicitVoice || 'mock-rachel';
   const characters =
     params.characters && params.characters.length > 0
       ? params.characters
@@ -236,7 +237,7 @@ export function generateExplainerProject(params: {
         transitionIn,
         characterId: character?.id,
         characterPlacement: placement,
-        voiceId: character?.voiceId || primaryVoiceId,
+        voiceId: explicitVoice ? primaryVoiceId : character?.voiceId || primaryVoiceId,
         voiceStatus: 'fallback',
         higgsfield: {
           status: 'fallback',
